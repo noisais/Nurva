@@ -76,7 +76,9 @@ private fun MainContent(
         } else {
             viewModel.currentDestination
         }
-        initialPage?.route?.runCatching { navController.navigate(this) }
+        initialPage?.route?.takeIf { route ->
+            navController.currentDestination?.route != route
+        }?.let { route -> navController.navigate(route) }
 
         navController.addOnDestinationChangedListener { _, destination, _ ->
             if (DrawerScreens.apiScreens.any { it.route == destination.route }) {

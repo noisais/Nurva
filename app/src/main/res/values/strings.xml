@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name" translatable="false">Nurva</string>
     <!-- Navigation Drawer -->
+    <string name="sync">Sync</string>
+    <string name="browse_wallpapers">Browse wallpapers</string>
     <string name="favorites">Favorites</string>
     <string name="history">History</string>
     <string name="settings">Settings</string>

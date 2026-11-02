@@ -6,11 +6,11 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.bnyro.wallpaper.App
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.ui.pages.AboutPage
 import com.bnyro.wallpaper.ui.pages.FavoritesPage
 import com.bnyro.wallpaper.ui.pages.HistoryPage
+import com.bnyro.wallpaper.ui.pages.NurvaSyncPage
 import com.bnyro.wallpaper.ui.pages.SettingsPage
 import com.bnyro.wallpaper.ui.pages.WallpaperPage
 import com.bnyro.wallpaper.util.Preferences
@@ -19,7 +19,7 @@ import com.bnyro.wallpaper.util.Preferences
 fun AppNavHost(
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController(),
-    startDestination: String = App.apis.first().route,
+    startDestination: String = DrawerScreens.Sync.route,
     viewModel: MainModel
 ) {
     NavHost(
@@ -27,6 +27,14 @@ fun AppNavHost(
         navController = navController,
         startDestination = startDestination
     ) {
+        composable(DrawerScreens.Sync.route) {
+            viewModel.titleResource = DrawerScreens.Sync.title
+            NurvaSyncPage(
+                onBrowseWallpapers = {
+                    navController.navigate(DrawerScreens.apiScreens.first().route)
+                }
+            )
+        }
         DrawerScreens.apiScreens.forEach { screen ->
             composable(screen.route) {
                 viewModel.titleResource = screen.title

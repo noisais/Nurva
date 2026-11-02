@@ -5,6 +5,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.bnyro.wallpaper.App
 import com.bnyro.wallpaper.R
@@ -18,6 +19,9 @@ open class DrawerScreens(
     val divideBefore: Boolean = false
 ) {
     companion object {
+        object Sync :
+            DrawerScreens(Either.Left(R.string.sync), "sync", Icons.Default.Sync)
+
         object Favorites :
             DrawerScreens(Either.Left(R.string.favorites), "favorites", Icons.Default.Favorite, true)
 
@@ -37,7 +41,7 @@ open class DrawerScreens(
             }
         }
         val screens by lazy {
-            listOfNotNull(*apiScreens.toTypedArray(), Favorites, History.takeIf {
+            listOf(Sync) + apiScreens + listOfNotNull(Favorites, History.takeIf {
                 Preferences.getBoolean(Preferences.wallpaperHistory, true)
             }, Settings, About)
         }
