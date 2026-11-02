@@ -19,7 +19,7 @@ import com.bnyro.wallpaper.util.Preferences
 fun AppNavHost(
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController(),
-    startDestination: String = DrawerScreens.Sync.route,
+    startDestination: String = DrawerScreens.Companion.Sync.route,
     viewModel: MainModel
 ) {
     NavHost(
@@ -27,8 +27,8 @@ fun AppNavHost(
         navController = navController,
         startDestination = startDestination
     ) {
-        composable(DrawerScreens.Sync.route) {
-            viewModel.titleResource = DrawerScreens.Sync.title
+        composable(DrawerScreens.Companion.Sync.route) {
+            viewModel.titleResource = DrawerScreens.Companion.Sync.title
             NurvaSyncPage(
                 onBrowseWallpapers = {
                     navController.navigate(DrawerScreens.apiScreens.first().route)

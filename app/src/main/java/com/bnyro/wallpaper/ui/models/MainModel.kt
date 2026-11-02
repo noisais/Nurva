@@ -31,7 +31,7 @@ class MainModel : ViewModel() {
     ).toInt()
     var themeMode by mutableStateOf(ThemeMode.entries[themeModeIndex])
 
-    var currentDestination: DrawerScreens by mutableStateOf(DrawerScreens.Sync)
+    var currentDestination: DrawerScreens by mutableStateOf(DrawerScreens.Companion.Sync)
     var api = App.apis.first()
 
     var wallpapers by mutableStateOf(
