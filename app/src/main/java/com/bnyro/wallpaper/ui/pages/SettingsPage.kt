@@ -3,14 +3,15 @@ package com.bnyro.wallpaper.ui.pages
 import android.annotation.SuppressLint
 import android.content.Context.POWER_SERVICE
 import android.content.Intent
-import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,13 +20,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.bnyro.wallpaper.R
@@ -46,10 +55,8 @@ import com.bnyro.wallpaper.ext.formatBinarySize
 import com.bnyro.wallpaper.obj.WallpaperConfig
 import com.bnyro.wallpaper.ui.components.ButtonWithIcon
 import com.bnyro.wallpaper.ui.components.WallpaperChangerPrefDialog
-import com.bnyro.wallpaper.ui.components.about.AboutContainer
 import com.bnyro.wallpaper.ui.components.prefs.CheckboxPref
 import com.bnyro.wallpaper.ui.components.prefs.ListPreference
-import com.bnyro.wallpaper.ui.components.prefs.SettingsCategory
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.util.BackupHelper
 import com.bnyro.wallpaper.util.Preferences
@@ -59,97 +66,88 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsPage(
-    viewModel: MainModel
+    viewModel: MainModel,
+    onManageAccount: () -> Unit,
+    onAbout: () -> Unit
 ) {
     val context = LocalContext.current.applicationContext
     val activity = LocalActivity.current
-    val wallpaperConfigs = remember {
-        Preferences.getWallpaperConfigs().toMutableStateList()
-    }
+    val wallpaperConfigs = remember { Preferences.getWallpaperConfigs().toMutableStateList() }
     val scope = rememberCoroutineScope()
 
-    val createFavoritesBackup =
-        rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(BackupHelper.JSON_MIME)) {
-            scope.launch(Dispatchers.IO) {
-                BackupHelper.backupFavorites(it ?: return@launch, context)
-            }
+    val createFavoritesBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(BackupHelper.JSON_MIME)
+    ) { uri ->
+        scope.launch(Dispatchers.IO) {
+            uri?.let { BackupHelper.backupFavorites(it, context) }
         }
-    val restoreFavoritesBackup =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
-            scope.launch(Dispatchers.IO) {
-                BackupHelper.restoreFavorites(it ?: return@launch, context)
-            }
+    }
+    val restoreFavoritesBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        scope.launch(Dispatchers.IO) {
+            uri?.let { BackupHelper.restoreFavorites(it, context) }
         }
+    }
 
-    val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(scrollState)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        AboutContainer {
-            Column {
-                SettingsCategory(
-                    title = stringResource(R.string.general)
-                )
-                ListPreference(
-                    prefKey = Preferences.themeModeKey,
-                    title = stringResource(R.string.theme_mode),
-                    entries = listOf(
-                        stringResource(R.string.theme_system),
-                        stringResource(R.string.theme_light),
-                        stringResource(R.string.theme_dark)
-                    ),
-                    values = (0..2).map { it.toString() },
-                    defaultValue = ThemeMode.AUTO.toString()
-                ) {
-                    viewModel.themeMode = ThemeMode.entries[it.toInt()]
-                }
-                CheckboxPref(
-                    prefKey = Preferences.wallpaperHistory,
-                    title = stringResource(R.string.wallpaper_history),
-                    defaultValue = true
-                )
-                CheckboxPref(
-                    prefKey = Preferences.autoLightenDarkenKey,
-                    title = stringResource(R.string.auto_darken_lighten_by_theme),
-                    summary = stringResource(R.string.auto_darken_lighten_by_theme_desc)
-                )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("PREFERENCES", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+            Text("Make Nurva yours", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                "Manage your account, appearance, wallpaper behavior, and local data.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        SettingsPanel(
+            title = "Account & devices",
+            description = "Manage your Nurva account, shared spaces, invitations, and device permissions."
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Group, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(10.dp))
+                Text("Your account and group access", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            }
+            Button(modifier = Modifier.fillMaxWidth(), onClick = onManageAccount) {
+                Text("Manage account and groups")
             }
         }
 
-        val cacheSizes = listOf(
-            16L,
-            32L,
-            64L,
-            128L,
-            256L
-        ).map { it * 1024L * 1024L }
-
-        AboutContainer {
-            Column {
-                SettingsCategory(
-                    title = stringResource(R.string.cache)
-                )
-                ListPreference(
-                    prefKey = Preferences.diskCacheKey,
-                    title = stringResource(R.string.coil_cache),
-                    entries = cacheSizes.map { it.formatBinarySize() },
-                    values = cacheSizes.map { it.toString() },
-                    defaultValue = Preferences.defaultDiskCacheSize.toString()
-                )
+        SettingsPanel(title = "Appearance", description = "Choose the look and feel of Nurva.") {
+            ListPreference(
+                prefKey = Preferences.themeModeKey,
+                title = stringResource(R.string.theme_mode),
+                entries = listOf(
+                    stringResource(R.string.theme_system),
+                    stringResource(R.string.theme_light),
+                    stringResource(R.string.theme_dark)
+                ),
+                values = (0..2).map { it.toString() },
+                defaultValue = ThemeMode.AUTO.toString()
+            ) {
+                viewModel.themeMode = ThemeMode.entries[it.toInt()]
             }
+            CheckboxPref(
+                prefKey = Preferences.autoLightenDarkenKey,
+                title = stringResource(R.string.auto_darken_lighten_by_theme),
+                summary = stringResource(R.string.auto_darken_lighten_by_theme_desc)
+            )
         }
 
-        AboutContainer {
-            SettingsCategory(
-                title = stringResource(R.string.wallpaper_changer)
+        SettingsPanel(title = "Wallpaper behavior", description = "Control automatic changes and your local wallpaper history.") {
+            CheckboxPref(
+                prefKey = Preferences.wallpaperHistory,
+                title = stringResource(R.string.wallpaper_history),
+                defaultValue = true
             )
-            Spacer(
-                modifier = Modifier
-                    .height(5.dp)
-            )
-
             var wallpaperChangerEnabled by remember {
                 mutableStateOf(Preferences.getBoolean(Preferences.wallpaperChangerKey, false))
             }
@@ -159,14 +157,10 @@ fun SettingsPage(
                 summary = stringResource(R.string.wallpaper_changer_summary)
             ) { newValue ->
                 wallpaperChangerEnabled = newValue
-
                 WorkerHelper.enqueueOrCancelAll(context, wallpaperConfigs)
-
-                // request unrestricted battery usage if not yet granted
                 if (newValue) {
-                    val pm = context.getSystemService(POWER_SERVICE) as PowerManager
-
-                    if (!pm.isIgnoringBatteryOptimizations(context.packageName)) {
+                    val powerManager = context.getSystemService(POWER_SERVICE) as PowerManager
+                    if (!powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
                         val intent = Intent().apply {
                             @SuppressLint("BatteryLife")
                             action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
@@ -176,43 +170,24 @@ fun SettingsPage(
                     }
                 }
             }
-
             AnimatedVisibility(visible = wallpaperChangerEnabled) {
-                Column(
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    var wallpaperConfigDialogIndex by remember {
-                        mutableStateOf<Int?>(null)
-                    }
-
-                    wallpaperConfigs.forEachIndexed { index, wallpaperConfig ->
-                        Spacer(modifier = Modifier.height(5.dp))
-
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    var editIndex by remember { mutableStateOf<Int?>(null) }
+                    wallpaperConfigs.forEachIndexed { index, config ->
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(text = wallpaperConfig.getSummary(context))
-
-                            Spacer(modifier = Modifier.weight(1f))
-
-                            ButtonWithIcon(
-                                icon = Icons.Default.Edit
-                            ) {
-                                wallpaperConfigDialogIndex = index
-                            }
-
-                            ButtonWithIcon(
-                                icon = Icons.Default.Delete
-                            ) {
-                                WorkerHelper.cancelWork(context, wallpaperConfig)
+                            Text(config.getSummary(context), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                            ButtonWithIcon(icon = Icons.Default.Edit) { editIndex = index }
+                            ButtonWithIcon(icon = Icons.Default.Delete) {
+                                WorkerHelper.cancelWork(context, config)
                                 wallpaperConfigs.removeAt(index)
                                 Preferences.setWallpaperConfigs(wallpaperConfigs)
                             }
                         }
                     }
-
-                    wallpaperConfigDialogIndex?.let { index ->
+                    editIndex?.let { index ->
                         WallpaperChangerPrefDialog(
                             wallpaperConfigs[index],
                             onConfigChange = { newConfig ->
@@ -220,69 +195,90 @@ fun SettingsPage(
                                 Preferences.setWallpaperConfigs(wallpaperConfigs)
                                 WorkerHelper.enqueue(context, newConfig, true)
                             },
-                            onDismissRequest = { wallpaperConfigDialogIndex = null }
+                            onDismissRequest = { editIndex = null }
                         )
                     }
-
-                    var newWallpaperConfig by remember {
-                        mutableStateOf<WallpaperConfig?>(null)
-                    }
-
-                    Button(
+                    var newConfig by remember { mutableStateOf<WallpaperConfig?>(null) }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
                         onClick = {
-                            val maxId = if (wallpaperConfigs.isNotEmpty()) {
-                                wallpaperConfigs.maxBy { it.id }.id
-                            } else {
-                                -1
-                            }
-
-                            newWallpaperConfig = WallpaperConfig(id = maxId + 1)
+                            val nextId = (wallpaperConfigs.maxOfOrNull { it.id } ?: -1) + 1
+                            newConfig = WallpaperConfig(id = nextId)
                         }
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                            Spacer(Modifier.width(5.dp))
-                            Text(stringResource(R.string.add_wallpaper_changer_rule))
-                        }
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.add_wallpaper_changer_rule))
                     }
-
-                    newWallpaperConfig?.let { config ->
+                    newConfig?.let { config ->
                         WallpaperChangerPrefDialog(
                             config,
-                            onConfigChange = { newConfig ->
-                                wallpaperConfigs.add(newConfig)
+                            onConfigChange = { updated ->
+                                wallpaperConfigs.add(updated)
                                 Preferences.setWallpaperConfigs(wallpaperConfigs)
-                                WorkerHelper.enqueue(context, newConfig, true)
+                                WorkerHelper.enqueue(context, updated, true)
                             },
-                            onDismissRequest = { newWallpaperConfig = null }
+                            onDismissRequest = { newConfig = null }
                         )
                     }
                 }
             }
         }
 
-        AboutContainer {
-            SettingsCategory(
-                title = stringResource(R.string.import_export)
+        val cacheSizes = listOf(16L, 32L, 64L, 128L, 256L).map { it * 1024L * 1024L }
+        SettingsPanel(title = "Storage & cache", description = "Choose how much temporary image data Nurva can keep on this device.") {
+            ListPreference(
+                prefKey = Preferences.diskCacheKey,
+                title = stringResource(R.string.coil_cache),
+                entries = cacheSizes.map { it.formatBinarySize() },
+                values = cacheSizes.map { it.toString() },
+                defaultValue = Preferences.defaultDiskCacheSize.toString()
             )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row {
+        }
+
+        SettingsPanel(title = "Backup & restore", description = "Move your locally saved favorites between devices.") {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = { restoreFavoritesBackup.launch(arrayOf(BackupHelper.JSON_MIME)) }
+                ) { Text(stringResource(R.string.import_favorites)) }
                 Button(
-                    onClick = {
-                        restoreFavoritesBackup.launch(arrayOf(BackupHelper.JSON_MIME))
-                    }
-                ) {
-                    Text(stringResource(R.string.import_favorites))
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                Button(
-                    onClick = {
-                        createFavoritesBackup.launch("wall_you_favorites_backup.json")
-                    }
-                ) {
-                    Text(stringResource(R.string.export_favorites))
-                }
+                    modifier = Modifier.weight(1f),
+                    onClick = { createFavoritesBackup.launch("nurva_favorites_backup.json") }
+                ) { Text(stringResource(R.string.export_favorites)) }
             }
         }
+
+        SettingsPanel(title = "About", description = "Version information, open-source licenses, and project links.") {
+            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = onAbout) {
+                Icon(Icons.Default.Info, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("About Nurva")
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun SettingsPanel(
+    title: String,
+    description: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            content = {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                content()
+            }
+        )
     }
 }

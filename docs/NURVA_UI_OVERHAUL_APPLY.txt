@@ -1,0 +1,99 @@
+NURVA UI OVERHAUL + GROUP ACCOUNTS — TERMUX INSTALL
+
+BASE BRANCH
+  feature/nurva-foundation
+BASE COMMIT
+  b778574438a83246f7f5e5ab8243620def0be9cb
+
+This ZIP is an overlay bundle. It contains only files to add or replace in the
+repository. It is not a source checkout and does not remove or rename other
+files. Existing package ID com.bnyro.wallpaper is intentionally preserved so
+this remains update-compatible with the current debug app.
+
+WHAT CHANGES
+  - Replaces the Wall You drawer shell with Nurva bottom navigation:
+    Home / Groups / Explore / Library / Settings.
+  - Adds a Nurva home dashboard and moves wallpaper providers into Explore.
+  - Combines favorites and recently applied into Library.
+  - Reorganizes settings into account/devices, appearance, wallpaper behavior,
+    storage/cache, backup/restore, and About Nurva.
+  - Adds a Nurva-specific light/dark color system, launcher vector palette,
+    Android theme name, and About page while retaining Wall You attribution.
+  - Adds email/password Supabase Auth, encrypted local sessions, group create,
+    role-scoped invite links, invite joining through nurva:// deep links,
+    member/device roster, and role-aware device revocation.
+  - Adds a database migration that provides device roster user/role metadata
+    and last-seen timestamps.
+  - Excludes Keystore-wrapped session/device credential preferences from
+    Android cloud backup and device transfer.
+  - Bumps versionCode to 44 for updating the previous debug installation.
+
+BEFORE INSTALLING THE OVERLAY
+  1. Open Termux and enter the repository:
+       cd ~/apps/Nurva
+  2. Confirm the correct branch:
+       git branch --show-current
+     It should print: feature/nurva-foundation
+  3. Make sure you have no uncommitted work you need to preserve:
+       git status --short --branch
+     If you see changes you want to keep, commit or back them up before
+     applying this bundle. Do not use git reset or git clean.
+
+APPLY THE OVERLAY
+  1. Download nurva-ui-overhaul-bundle.zip to your Android Downloads folder.
+  2. In Termux:
+       termux-setup-storage
+       cd ~/apps/Nurva
+       unzip -o ~/storage/downloads/nurva-ui-overhaul-bundle.zip -d ~/apps/Nurva
+       git diff --check
+       git status --short
+  3. Inspect the changes. The ZIP overwrites matching source files but does
+     not delete unrelated project files.
+
+SUPABASE SETUP IS REQUIRED FOR LIVE ACCOUNTS/GROUPS
+  1. In Supabase, enable Email/Password authentication under Auth Providers.
+  2. Apply these SQL migrations, in this exact order, using the Supabase SQL
+     Editor (or your normal Supabase migration workflow):
+       backend/supabase/migrations/202611010001_nurva_sync.sql
+       backend/supabase/migrations/202611010002_nurva_device_roster_permissions.sql
+  3. Add these values to the local root local.properties file. Keep any
+     existing sdk.dir line. Do not commit local.properties:
+       NURVA_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+       NURVA_SUPABASE_PUBLISHABLE_KEY=sb_publishable_YOUR_KEY
+  4. For GitHub-built APKs, add Actions repository secrets with the same names:
+       NURVA_SUPABASE_URL
+       NURVA_SUPABASE_PUBLISHABLE_KEY
+     Use a publishable key only. Never place a Supabase secret/service-role
+     key in the Android app, local.properties, Gradle, or an APK.
+
+BUILD / CHECK
+  If the Android SDK is configured in Termux:
+       ./gradlew testDebugUnitTest assembleDebug
+
+  Otherwise, commit and push, then let the project GitHub Actions workflows
+  perform the Android build, unit tests, database smoke tests, and APK upload.
+  The project owner can inspect those workflow results through the usual
+  development conversation; this README does not claim a successful build.
+
+COMMIT AND PUSH
+       git add .github app backend docs
+       git diff --cached --check
+       git commit -m "Redesign Nurva UI and add account group flows"
+       git push
+
+FIRST LIVE TEST
+  - Install the configured APK on device 1, create/sign into an account, and
+    create a named group.
+  - Create an Editor or Viewer invite, then copy or share its Nurva link.
+  - Install the same configured APK on device 2, sign in with the joining
+    account, open the invite link, and tap Join group.
+  - On device 1, refresh the group and verify the member role, both devices,
+    last check-in values, and device-revoke action.
+
+CURRENT SCOPE
+  Account sign-up/sign-in, group creation/joining, invitation links, member
+  roles, device listing, and device revocation are wired to the existing RPCs.
+  Actual use is unverified until the user's Supabase project is configured and
+  a two-device test is completed. Wallpaper upload/download and background
+  synchronization, automatic remote application, QR codes, mosaics, and
+  schedules are not implemented by this increment.

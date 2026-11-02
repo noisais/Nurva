@@ -12,13 +12,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.get
 import com.bnyro.wallpaper.enums.ThemeMode
 import com.bnyro.wallpaper.ui.models.MainModel
-import com.bnyro.wallpaper.ui.theme.WallYouTheme
+import com.bnyro.wallpaper.ui.theme.NurvaTheme
 
 open class BaseActivity : ComponentActivity() {
     fun showContent(content: @Composable () -> Unit) {
         val viewModel: MainModel = ViewModelProvider(this).get()
         setContent {
-            WallYouTheme(
+            NurvaTheme(
                 darkTheme = when (viewModel.themeMode) {
                     ThemeMode.LIGHT -> false
                     ThemeMode.DARK -> true
@@ -29,7 +29,7 @@ open class BaseActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    content.invoke()
+                    content()
                 }
             }
         }

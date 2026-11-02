@@ -31,11 +31,11 @@ jobs:
       - name: Install Android SDK platform
         uses: android-actions/setup-android@v3
         with:
-          # The action's default also requests the removed SDK "tools" package.
           packages: platform-tools
-      # The Android Gradle Plugin resolves compileSdk = 37 during the Gradle build.
-      # The hosted SDK package index does not expose platforms;android-37 to sdkmanager.
       - name: Run unit tests and assemble debug APK
+        env:
+          NURVA_SUPABASE_URL: ${{ secrets.NURVA_SUPABASE_URL }}
+          NURVA_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NURVA_SUPABASE_PUBLISHABLE_KEY }}
         run: ./gradlew testDebugUnitTest assembleDebug
       - name: Upload unit-test reports
         if: always()
@@ -108,7 +108,11 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611010001_nurva_sync.sql
-      - name: Smoke-test group, invite, revision, theme, schedule and revocation flows
+      - name: Add device roster user and role fields
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611010002_nurva_device_roster_permissions.sql
+      - name: Smoke-test group, invite, device permissions, revision, theme, schedule and revocation flows
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/tests/nurva_migration_smoke.sql

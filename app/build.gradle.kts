@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,6 +8,16 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val nurvaLocalProperties = Properties().apply {
+    val configFile = rootProject.file("local.properties")
+    if (configFile.isFile) configFile.inputStream().use { load(it) }
+}
+fun nurvaConfigValue(name: String): String =
+    providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
+        ?: nurvaLocalProperties.getProperty(name).orEmpty()
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")}\""
+
 android {
     namespace = "com.bnyro.wallpaper"
     compileSdk = 37
@@ -15,8 +26,12 @@ android {
         applicationId = "com.bnyro.wallpaper"
         minSdk = 24
         targetSdk = 36
-        versionCode = 43
-        versionName = "17.1"
+        versionCode = 44
+        versionName = "0.1.0-alpha"
+
+        // Publishable/anon client key only. A Supabase secret/service-role key must never be embedded in an APK.
+        buildConfigField("String", "NURVA_SUPABASE_URL", buildConfigString(nurvaConfigValue("NURVA_SUPABASE_URL")))
+        buildConfigField("String", "NURVA_SUPABASE_PUBLISHABLE_KEY", buildConfigString(nurvaConfigValue("NURVA_SUPABASE_PUBLISHABLE_KEY")))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -87,6 +102,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.12.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("com.squareup.okhttp3:okhttp:5.0.0")
 
     // UI
     implementation("androidx.activity:activity-compose:1.13.0")

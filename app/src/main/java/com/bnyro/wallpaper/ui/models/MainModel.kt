@@ -31,12 +31,11 @@ class MainModel : ViewModel() {
     ).toInt()
     var themeMode by mutableStateOf(ThemeMode.entries[themeModeIndex])
 
-    var currentDestination: DrawerScreens by mutableStateOf(DrawerScreens.Companion.Sync)
+    var currentDestination: DrawerScreens by mutableStateOf(DrawerScreens.Companion.Home)
+    var pendingInviteToken by mutableStateOf("")
     var api = App.apis.first()
 
-    var wallpapers by mutableStateOf(
-        listOf<Wallpaper>()
-    )
+    var wallpapers by mutableStateOf(listOf<Wallpaper>())
 
     val favWallpapers: StateFlow<List<Wallpaper>> =
         DatabaseHolder.Database.favoritesDao().getFavoritesFlow().stateIn(
@@ -53,21 +52,16 @@ class MainModel : ViewModel() {
         )
 
     var titleResource by mutableStateOf<Either<Int, String>>(Either.Left(R.string.app_name))
-
     var page: Int = 1
 
     private var wallpaperJob: Job? = null
     fun fetchWallpapers(onException: (Exception, WallpaperApiWrapper) -> Unit) {
-        // ensure that only one job for loading new wallpapers is run at a time
-        // this prevents that quick switching between different wallpaper sources causes the app
-        // to display images from all sources, because they were still loading in the background
         wallpaperJob?.cancel()
         wallpaperJob = viewModelScope.launch {
             try {
                 val newWallpapers = withContext(Dispatchers.IO) {
                     api.getWallpapers(page)
                 }.map { Wallpaper(it) }
-                // remove duplicated results - e.g. if multiple posts contain the same image
                 wallpapers = (wallpapers + newWallpapers).distinctBy { it.imgSrc }
                 page += 1
             } catch (e: Exception) {

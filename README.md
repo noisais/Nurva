@@ -1,66 +1,57 @@
-<!-- ---------- Header ---------- -->
 <div align="center">
-  <img width="200" height="200"src="fastlane/metadata/android/en-US/images/icon.png">
-  <h1>Wall You</h1>
-<p>Privacy focused wallpaper app built with MD3.</p>
-
-<!-- ---------- Badges ---------- -->
-  <div align="center">
-    <img alt="License" src="https://img.shields.io/github/license/you-apps/WallYou?color=c3e7ff&style=flat-square">
-    <img alt="Downloads" src="https://img.shields.io/github/downloads/you-apps/WallYou/total.svg?color=c3e7ff&style=flat-square">
-    <img alt="Last commit" src="https://img.shields.io/github/last-commit/you-apps/WallYou?color=c3e7ff&style=flat-square">
-    <img alt="Repo size" src="https://img.shields.io/github/repo-size/you-apps/WallYou?color=c3e7ff&style=flat-square">
-    <img alt="Stars" src="https://img.shields.io/github/stars/you-apps/WallYou?color=c3e7ff&style=flat-square">
-    <br>
-</div>
+  <img width="132" height="132" src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="Nurva app icon">
+  <h1>Nurva</h1>
+  <p><strong>Your screens. Connected.</strong></p>
+  <p>A shared wallpaper space for Android devices — at home or miles apart.</p>
+  <p>
+    <a href="https://github.com/noisais/Nurva/actions/workflows/ci.yml"><img alt="Android CI" src="https://github.com/noisais/Nurva/actions/workflows/ci.yml/badge.svg?branch=feature/nurva-foundation"></a>
+    <a href="https://github.com/noisais/Nurva/actions/workflows/nurva-foundation-ci.yml"><img alt="Nurva foundation CI" src="https://github.com/noisais/Nurva/actions/workflows/nurva-foundation-ci.yml/badge.svg?branch=feature/nurva-foundation"></a>
+  </p>
 </div>
 
-<!-- ---------- Description ---------- -->
-## Features
+## What Nurva is
 
-- [x] Wallpaper Browsing and Downloading
-- [x] Automatic Wallpaper Changer
-- [x] Favorites List
-- [x] Wallpaper History
-- [x] Image Filter Effects
+Nurva is an Android-first project for keeping wallpapers consistent across groups of devices, including devices that are not on the same Wi-Fi network. It is being built on the open-source Wall You wallpaper engine while replacing its original app experience with a Nurva-specific interface and shared-device features.
 
-<!-- ---------- Download ---------- -->
-## Download
-  <div align="center">
+## Current app experience
 
-[<img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" alt="Get it on F-Droid" height="80">](https://f-droid.org/packages/com.bnyro.wallpaper/)
-[<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroid.png" alt="Get it on IzzyOnDroid" height="80">](https://apt.izzysoft.de/fdroid/index/apk/com.bnyro.wallpaper)
-[<img src="https://raw.githubusercontent.com/vadret/android/master/assets/get-github.png" alt="Get it on GitHub" height="80">](https://github.com/you-apps/WallYou/releases)
+- **Home** — shared-space overview and shortcuts.
+- **Groups** — email account, create or join a group, issue Editor/Viewer invitations, inspect member roles and registered devices, and revoke device access.
+- **Explore** — browse the existing wallpaper sources.
+- **Library** — favorites and recently applied wallpapers.
+- **Settings** — account/device management, appearance, wallpaper behavior, cache, backup/restore, and About.
 
-</div>
+## Implemented foundation
 
-<!-- ---------- Screenshots ---------- -->
-## Screenshots
+- Local Room storage for groups, members, devices, revisions, themes, schedules, and a sync outbox.
+- Per-group device credentials encrypted with Android Keystore.
+- Supabase email/password sign-in with encrypted local session storage.
+- Authenticated RPCs for group creation, invite creation, joining, sync-state reads, and device revocation.
+- Role-aware device roster and invite-link deep links.
+- Supabase migrations and PostgreSQL smoke tests.
 
-<div style="display: flex;">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1-home.png" width=30%>
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2-filter.png" width=30%>
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3-option.png" width=30%>
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4-about.png" width=30%>
+Cloud account and group features require a configured Supabase project. See [the setup guide](docs/NURVA_GROUPS_SETUP.md).
 
-</div>
+## Roadmap
 
-<!-- ---------- Contribution ---------- -->
-## Feedback and contributions
-***All contributions are very welcome!***
+- [ ] Wallpaper upload and download across devices.
+- [ ] WorkManager-powered offline queue processing and automatic reconnect sync.
+- [ ] Optional approval before remote wallpaper application.
+- [ ] Per-device wallpaper targets and automatic application.
+- [ ] Multi-device mosaic creation and distribution.
+- [ ] Shared themes and scheduled changes.
+- [ ] Invite QR codes and improved account recovery flows.
 
-* Feel free to join the [Matrix room](https://matrix.to/#/#you-apps:matrix.org) for discussions about the app.
-* Bug reports and feature requests can be submitted [here](https://github.com/you-apps/WallYou/issues) (please make sure to fill out all the requested information properly!).
-* If you are a developer and wish to contribute to the app, please **fork** the project and submit a [**pull request**](https://help.github.com/articles/about-pull-requests/).
+## Build
 
-## Translation
-<a href="https://hosted.weblate.org/projects/you-apps/wall-you/">
-<img src="https://hosted.weblate.org/widgets/you-apps/-/wall-you/287x66-grey.png" alt="Translation status" />
-</a>
+The Android app uses Gradle and JDK 17. From the repository root:
 
-## Credits
-* Icon design by [M00NJ](https://github.com/M00NJ)
+```bash
+./gradlew testDebugUnitTest assembleDebug
+```
 
-## License
+For live account/group functionality, follow [Supabase setup](docs/NURVA_GROUPS_SETUP.md). Never put a Supabase secret/service-role key in the Android app. Only the publishable client key belongs in a client build.
 
-Wall You is licensed under the [**GNU General Public License**](https://www.gnu.org/licenses/gpl.html): You can use, study and share it as you want.
+## Open-source foundation
+
+Nurva retains the GPL-3.0 license obligations and upstream notices from [Wall You](https://github.com/you-apps/WallYou). See the repository's license file and the app's About page for project links and attribution.

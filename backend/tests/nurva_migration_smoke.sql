@@ -11,6 +11,7 @@ DECLARE
   revision_id uuid;
   theme_id uuid;
   schedule_id uuid;
+  sync_state jsonb;
   denied boolean := false;
 BEGIN
   INSERT INTO auth.users(id) VALUES(owner_id),(member_id);
@@ -33,6 +34,19 @@ BEGIN
   IF NOT public.nurva_update_device_preferences(group_id,member_device,repeat('c',64),'both','manual') THEN RAISE EXCEPTION 'Device preference update failed'; END IF;
 
   PERFORM set_config('request.jwt.claim.sub',owner_id::text,false);
+  sync_state := public.nurva_get_sync_state(group_id,owner_device,repeat('a',64));
+  IF NOT EXISTS(SELECT 1 FROM public.nurva_devices WHERE id=owner_device AND last_seen_at IS NOT NULL) THEN
+    RAISE EXCEPTION 'Sync-state refresh did not update the device last-seen timestamp';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(sync_state->'devices') AS device(item)
+    WHERE item->>'id'=owner_device::text AND item->>'userId'=owner_id::text AND item->>'role'='owner'
+  ) THEN RAISE EXCEPTION 'Device roster did not include owner identity and role'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(sync_state->'devices') AS device(item)
+    WHERE item->>'id'=member_device::text AND item->>'userId'=member_id::text AND item->>'role'='editor'
+  ) THEN RAISE EXCEPTION 'Device roster did not include invited member role'; END IF;
+
   theme_id := public.nurva_save_theme(group_id,owner_device,repeat('a',64),null,'Test theme','shared',jsonb_build_array(jsonb_build_object('revisionId',revision_id::text,'deviceId',null)),true);
   schedule_id := public.nurva_save_schedule(group_id,owner_device,repeat('a',64),null,theme_id,127,9,0,'UTC',true,false);
   IF schedule_id IS NULL THEN RAISE EXCEPTION 'Schedule not created'; END IF;

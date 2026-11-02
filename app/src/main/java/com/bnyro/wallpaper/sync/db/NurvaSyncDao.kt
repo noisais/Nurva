@@ -24,11 +24,33 @@ interface NurvaSyncDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertMembers(members: List<SyncGroupMemberEntity>)
 
+    @Query("DELETE FROM nurva_group_members WHERE groupId = :groupId")
+    suspend fun clearMembers(groupId: String)
+
     @Query("SELECT * FROM nurva_sync_devices WHERE groupId = :groupId ORDER BY displayName")
     fun observeDevices(groupId: String): Flow<List<SyncDeviceEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDevice(device: SyncDeviceEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertDevices(devices: List<SyncDeviceEntity>)
+
+    @Query("DELETE FROM nurva_sync_devices WHERE groupId = :groupId")
+    suspend fun clearDevices(groupId: String)
+
+    @Transaction
+    suspend fun replaceRemoteSnapshot(
+        group: SyncGroupEntity,
+        members: List<SyncGroupMemberEntity>,
+        devices: List<SyncDeviceEntity>
+    ) {
+        upsertGroup(group)
+        clearMembers(group.groupId)
+        if (members.isNotEmpty()) upsertMembers(members)
+        clearDevices(group.groupId)
+        if (devices.isNotEmpty()) upsertDevices(devices)
+    }
 
     @Query("UPDATE nurva_sync_devices SET revokedAt = :revokedAt WHERE deviceId = :deviceId")
     suspend fun markDeviceRevoked(deviceId: String, revokedAt: Long)
