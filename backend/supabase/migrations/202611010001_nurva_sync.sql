@@ -215,7 +215,7 @@ begin
   update public.nurva_invites set uses=uses+1 where id=i.id;
   insert into public.nurva_group_members as existing_member(group_id,user_id,role)
     values(i.group_id,u,i.role)
-    on conflict(group_id,user_id) do update set
+    on conflict on constraint nurva_group_members_pkey do update set
       role=case when existing_member.role in ('owner','admin') then existing_member.role
                 when existing_member.role='editor' or excluded.role='editor' then 'editor' else 'viewer' end,
       removed_at=null;

@@ -30,6 +30,9 @@ jobs:
           cache: gradle
       - name: Install Android SDK platform
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default also requests the removed SDK "tools" package.
+          packages: platform-tools
       - name: Install compile SDK platform
         run: sdkmanager "platforms;android-37"
       - name: Run unit tests and assemble debug APK
