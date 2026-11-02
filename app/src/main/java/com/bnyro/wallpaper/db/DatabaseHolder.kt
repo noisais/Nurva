@@ -2,6 +2,7 @@ package com.bnyro.wallpaper.db
 
 import android.content.Context
 import androidx.room.Room
+import com.bnyro.wallpaper.sync.db.NurvaMigrations
 
 object DatabaseHolder {
     private const val DATABASE_NAME = "WallYouDb"
@@ -12,6 +13,8 @@ object DatabaseHolder {
             applicationContext,
             AppDatabase::class.java,
             DATABASE_NAME
-        ).build()
+        )
+            .addMigrations(NurvaMigrations.MIGRATION_3_4)
+            .build()
     }
 }

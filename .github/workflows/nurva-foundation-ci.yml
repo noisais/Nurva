@@ -1,0 +1,111 @@
+name: Nurva foundation CI
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "app/**"
+      - "backend/**"
+      - ".github/workflows/nurva-foundation-ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "backend/**"
+      - ".github/workflows/nurva-foundation-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android unit tests and debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/wrapper-validation-action@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Install Android SDK platform
+        uses: android-actions/setup-android@v3
+      - name: Install compile SDK platform
+        run: sdkmanager "platforms;android-37"
+      - name: Run unit tests and assemble debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug
+      - name: Upload unit-test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurva-unit-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurva-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  backend:
+    name: Edge Function checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Type-check Edge Functions
+        run: deno check backend/supabase/functions/sign-wallpaper-upload/index.ts backend/supabase/functions/sign-wallpaper-download/index.ts backend/supabase/functions/publish-wallpaper/index.ts
+      - name: Test supported image signatures
+        run: deno test backend/supabase/functions/_shared/imageInspection_test.ts
+
+  database-migration:
+    name: PostgreSQL schema and RPC smoke test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Prepare minimal Supabase auth and storage schemas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE ROLE service_role NOLOGIN BYPASSRLS;
+          CREATE SCHEMA auth;
+          CREATE SCHEMA storage;
+          CREATE SCHEMA extensions;
+          CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+          CREATE TABLE auth.users(id uuid PRIMARY KEY);
+          CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS
+            $$ SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+          GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
+          GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated, service_role;
+          CREATE TABLE storage.buckets(id text PRIMARY KEY, name text NOT NULL, public boolean NOT NULL DEFAULT false, file_size_limit bigint, allowed_mime_types text[]);
+          CREATE TABLE storage.objects(bucket_id text NOT NULL, name text NOT NULL, PRIMARY KEY(bucket_id,name));
+          SQL
+      - name: Apply Nurva database migration
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611010001_nurva_sync.sql
+      - name: Smoke-test group, invite, revision, theme, schedule and revocation flows
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/tests/nurva_migration_smoke.sql

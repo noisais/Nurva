@@ -1,0 +1,10 @@
+project_id = "nurva-local"
+
+[functions.sign-wallpaper-upload]
+verify_jwt = true
+
+[functions.sign-wallpaper-download]
+verify_jwt = true
+
+[functions.publish-wallpaper]
+verify_jwt = true
