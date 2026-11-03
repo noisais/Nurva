@@ -30,6 +30,9 @@ interface NurvaSyncDao {
     @Query("SELECT * FROM nurva_sync_devices WHERE groupId = :groupId ORDER BY displayName")
     fun observeDevices(groupId: String): Flow<List<SyncDeviceEntity>>
 
+    @Query("SELECT * FROM nurva_sync_devices WHERE deviceId = :deviceId LIMIT 1")
+    suspend fun getDevice(deviceId: String): SyncDeviceEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDevice(device: SyncDeviceEntity)
 
@@ -103,6 +106,12 @@ interface NurvaSyncDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun enqueue(operation: SyncOutboxEntity)
+
+    @Query("SELECT * FROM nurva_sync_outbox WHERE operationId = :operationId LIMIT 1")
+    suspend fun getOperation(operationId: String): SyncOutboxEntity?
+
+    @Query("UPDATE nurva_sync_outbox SET nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE operationId = :operationId")
+    suspend fun scheduleOperation(operationId: String, nextAttemptAt: Long, lastError: String?)
 
     @Query("SELECT * FROM nurva_sync_outbox WHERE nextAttemptAt <= :now ORDER BY createdAt LIMIT :limit")
     suspend fun getDueOperations(now: Long, limit: Int = 20): List<SyncOutboxEntity>

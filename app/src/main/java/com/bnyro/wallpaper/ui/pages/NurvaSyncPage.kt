@@ -57,13 +57,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bnyro.wallpaper.db.DatabaseHolder
-import com.bnyro.wallpaper.enums.WallpaperTarget
 import com.bnyro.wallpaper.sync.auth.NurvaRepository
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
-import com.bnyro.wallpaper.util.WallpaperHelper
+import com.bnyro.wallpaper.util.NurvaSyncWorker
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
@@ -131,6 +130,7 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     val selectedGroup = groups.firstOrNull { it.groupId == selectedGroupId }
     val signedInUserRole = members.firstOrNull { it.userId == session?.userId }?.role
     val currentDeviceId = selectedGroupId.takeIf { it.isNotBlank() }?.let(repository::currentDeviceId)
+    val thisDevice = devices.firstOrNull { it.deviceId == currentDeviceId }
 
     LaunchedEffect(selectedGroupId) {
         createdInviteLink = ""
@@ -149,6 +149,7 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     }
     LaunchedEffect(session?.userId) {
         if (session != null) {
+            NurvaSyncWorker.enqueueNow(context)
             runCatching { withContext(Dispatchers.IO) { repository.refreshGroups() } }
                 .onFailure {
                     if (repository.currentSession() == null) session = null
@@ -339,29 +340,56 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                             wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
                         }
                     ) { Text("Choose image & publish") }
+                    if (thisDevice != null && selectedGroup.currentRevision > thisDevice.lastAppliedRevision) {
+                        Text(
+                            if (thisDevice.applyMode == "manual") {
+                                "Revision ${selectedGroup.currentRevision} is waiting for your approval."
+                            } else {
+                                "Revision ${selectedGroup.currentRevision} is queued for automatic sync."
+                            },
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    if (thisDevice != null) {
+                        Text("THIS DEVICE'S SYNC SETTINGS", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        DeviceSyncPreferences(
+                            device = thisDevice,
+                            enabled = !isBusy,
+                            onChange = { target, mode ->
+                                scope.launch {
+                                    isBusy = true
+                                    errorMessage = ""
+                                    statusMessage = ""
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            repository.updateDevicePreferences(selectedGroup.groupId, target, mode)
+                                        }
+                                        NurvaSyncWorker.enqueueNow(context)
+                                        statusMessage = "This device's sync preferences were saved."
+                                    } catch (error: Exception) {
+                                        errorMessage = error.message ?: "Could not save device preferences."
+                                    } finally {
+                                        isBusy = false
+                                    }
+                                }
+                            }
+                        )
+                    }
                     if (selectedGroup.currentRevision > 0L) {
                         OutlinedButton(
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = !isBusy,
+                            enabled = !isBusy && thisDevice != null,
                             onClick = {
                                 scope.launch {
                                     isBusy = true
                                     errorMessage = ""
                                     statusMessage = ""
                                     try {
-                                        val groupId = selectedGroup.groupId
-                                        val revision = selectedGroup.currentRevision
-                                        val file = withContext(Dispatchers.IO) {
-                                            repository.downloadCurrentWallpaper(groupId)
+                                        val revision = withContext(Dispatchers.IO) {
+                                            repository.applyLatestWallpaper(selectedGroup.groupId)
                                         }
-                                        val targetName = devices.firstOrNull { it.deviceId == currentDeviceId }?.wallpaperTarget
-                                        val target = when (targetName) {
-                                            "home" -> WallpaperTarget.HOME
-                                            "both" -> WallpaperTarget.BOTH
-                                            else -> WallpaperTarget.LOCK
-                                        }
-                                        WallpaperHelper.setWallpaperFromFile(context, file, target)
-                                        statusMessage = "Revision $revision downloaded, verified and applied."
+                                        statusMessage = "Revision $revision downloaded, verified and applied to this device."
                                     } catch (error: Exception) {
                                         errorMessage = error.message ?: "Could not download or apply the group wallpaper."
                                     } finally {
@@ -369,7 +397,9 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                                     }
                                 }
                             }
-                        ) { Text("Download & apply latest") }
+                        ) {
+                            Text(if (thisDevice?.applyMode == "manual") "Approve & apply latest" else "Apply latest now")
+                        }
                     }
 
                     Text("INVITATIONS", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
@@ -544,6 +574,56 @@ private fun MemberRow(member: SyncGroupMemberEntity) {
         Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
             Text(member.role.uppercase(), modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
+    }
+}
+
+@Composable
+private fun DeviceSyncPreferences(
+    device: SyncDeviceEntity,
+    enabled: Boolean,
+    onChange: (target: String, mode: String) -> Unit
+) {
+    var targetExpanded by remember(device.deviceId) { mutableStateOf(false) }
+    var modeExpanded by remember(device.deviceId) { mutableStateOf(false) }
+
+    Text("Wallpaper destination", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    OutlinedButton(enabled = enabled, onClick = { targetExpanded = true }) {
+        Text(
+            when (device.wallpaperTarget) {
+                "home" -> "Home screen only"
+                "both" -> "Home + lock screens"
+                else -> "Lock screen only"
+            }
+        )
+    }
+    DropdownMenu(expanded = targetExpanded, onDismissRequest = { targetExpanded = false }) {
+        DropdownMenuItem(text = { Text("Lock screen only") }, onClick = {
+            targetExpanded = false
+            onChange("lock", device.applyMode)
+        })
+        DropdownMenuItem(text = { Text("Home screen only") }, onClick = {
+            targetExpanded = false
+            onChange("home", device.applyMode)
+        })
+        DropdownMenuItem(text = { Text("Home + lock screens") }, onClick = {
+            targetExpanded = false
+            onChange("both", device.applyMode)
+        })
+    }
+
+    Text("When a new group wallpaper arrives", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    OutlinedButton(enabled = enabled, onClick = { modeExpanded = true }) {
+        Text(if (device.applyMode == "auto") "Apply automatically" else "Ask me before applying")
+    }
+    DropdownMenu(expanded = modeExpanded, onDismissRequest = { modeExpanded = false }) {
+        DropdownMenuItem(text = { Text("Apply automatically") }, onClick = {
+            modeExpanded = false
+            onChange(device.wallpaperTarget, "auto")
+        })
+        DropdownMenuItem(text = { Text("Ask me before applying") }, onClick = {
+            modeExpanded = false
+            onChange(device.wallpaperTarget, "manual")
+        })
     }
 }
 

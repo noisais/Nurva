@@ -32,6 +32,8 @@ BEGIN
   PERFORM set_config('request.jwt.claim.sub',member_id::text,false);
   PERFORM * FROM public.nurva_join_with_invite(token,member_device,repeat('c',64),'Member phone','both','manual');
   IF NOT public.nurva_update_device_preferences(group_id,member_device,repeat('c',64),'both','manual') THEN RAISE EXCEPTION 'Device preference update failed'; END IF;
+  IF NOT public.nurva_mark_revision_applied(group_id,member_device,repeat('c',64),1) THEN RAISE EXCEPTION 'Applied-revision acknowledgement failed'; END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.nurva_devices WHERE id=member_device AND last_applied_revision=1) THEN RAISE EXCEPTION 'Device applied revision was not persisted'; END IF;
 
   PERFORM set_config('request.jwt.claim.sub',owner_id::text,false);
   sync_state := public.nurva_get_sync_state(group_id,owner_device,repeat('a',64));

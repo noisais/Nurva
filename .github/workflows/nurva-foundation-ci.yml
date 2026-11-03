@@ -112,6 +112,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611010002_nurva_device_roster_permissions.sql
+      - name: Add device applied-revision acknowledgement RPC
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611020001_nurva_applied_revision.sql
       - name: Smoke-test group, invite, device permissions, revision, theme, schedule and revocation flows
         env:
           PGPASSWORD: postgres

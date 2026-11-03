@@ -26,6 +26,7 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import com.bnyro.wallpaper.db.DatabaseHolder
 import com.bnyro.wallpaper.util.Preferences
+import com.bnyro.wallpaper.util.NurvaSyncWorker
 import com.bnyro.wallpaper.util.WallpaperApiWrapper
 import net.youapps.wallpaper_apis.RetrofitHelper
 import net.youapps.wallpaper_apis.bi.BingApi
@@ -52,6 +53,7 @@ class App : Application(), SingletonImageLoader.Factory {
         Preferences.init(this)
 
         DatabaseHolder.create(this)
+        NurvaSyncWorker.schedulePeriodic(this)
     }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader {

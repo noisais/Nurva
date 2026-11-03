@@ -6,11 +6,14 @@ import android.net.Uri
 import android.os.Build
 import com.bnyro.wallpaper.BuildConfig
 import com.bnyro.wallpaper.db.DatabaseHolder
+import com.bnyro.wallpaper.enums.WallpaperTarget
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.sync.db.SyncOutboxEntity
 import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.sync.security.DeviceCredentialStore
+import com.bnyro.wallpaper.util.WallpaperHelper
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -378,6 +381,154 @@ class NurvaRepository(context: Context) {
             temporaryFile.delete()
         }
     }
+
+    /** Save this device's target screens and whether new wallpapers need approval. */
+    suspend fun updateDevicePreferences(groupId: String, target: String, mode: String) {
+        require(target in setOf("lock", "home", "both")) { "Choose lock screen, home screen or both." }
+        require(mode in setOf("auto", "manual")) { "Choose automatic apply or manual approval." }
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        rpc(
+            "nurva_update_device_preferences",
+            JSONObject()
+                .put("p_group", groupId)
+                .put("p_device", identity.deviceId)
+                .put("p_secret", identity.secret)
+                .put("p_target", target)
+                .put("p_mode", mode),
+            session
+        )
+        refreshGroup(groupId)
+    }
+
+    /**
+     * Poll every joined group, persist an apply operation locally, and process due automatic
+     * operations. WorkManager requires a network connection and retries this worker on failure.
+     */
+    suspend fun syncAndApplyAvailableWallpapers() {
+        val session = currentSession() ?: return
+        localIndex.groupIds(session.userId).forEach { groupId ->
+            refreshGroup(groupId)
+            val deviceId = localIndex.deviceId(session.userId, groupId) ?: return@forEach
+            val device = dao.getDevice(deviceId) ?: return@forEach
+            val group = dao.getGroup(groupId) ?: return@forEach
+            val revision = dao.getLatestRevision(groupId)
+                ?.takeIf { it.revision == group.currentRevision }
+                ?: return@forEach
+            if (revision.revision <= device.lastAppliedRevision) return@forEach
+
+            val operationId = wallpaperApplyOperationId(groupId, revision.revision)
+            val existing = dao.getOperation(operationId)
+            val nextAttempt = if (device.applyMode == "auto") System.currentTimeMillis() else Long.MAX_VALUE
+            if (existing == null) {
+                dao.enqueue(
+                    SyncOutboxEntity(
+                        operationId = operationId,
+                        groupId = groupId,
+                        operationType = "apply_wallpaper",
+                        payloadJson = JSONObject()
+                            .put("groupId", groupId)
+                            .put("revision", revision.revision)
+                            .toString(),
+                        createdAt = System.currentTimeMillis(),
+                        attempts = 0,
+                        nextAttemptAt = nextAttempt,
+                        lastError = if (device.applyMode == "manual") "Waiting for approval" else null
+                    )
+                )
+            } else if (device.applyMode == "manual" && existing.nextAttemptAt != Long.MAX_VALUE) {
+                dao.scheduleOperation(operationId, Long.MAX_VALUE, "Waiting for approval")
+            } else if (device.applyMode == "auto" && existing.nextAttemptAt == Long.MAX_VALUE) {
+                dao.scheduleOperation(operationId, System.currentTimeMillis(), null)
+            }
+        }
+        processQueuedWallpaperApplications()
+    }
+
+    /** Explicit user approval uses the same verified download/apply path as automatic sync. */
+    suspend fun applyLatestWallpaper(groupId: String): Long {
+        refreshGroup(groupId)
+        val session = validSession()
+        val deviceId = localIndex.deviceId(session.userId, groupId)
+            ?: error("This device is not registered in that group.")
+        var device = dao.getDevice(deviceId)
+            ?: error("This device's settings are not available. Refresh the group.")
+        val group = dao.getGroup(groupId)
+            ?: error("Group information is not available.")
+        check(group.currentRevision > 0L) { "This group has not published a wallpaper yet." }
+        if (device.lastAppliedRevision >= group.currentRevision) {
+            dao.completeOperation(wallpaperApplyOperationId(groupId, group.currentRevision))
+            return group.currentRevision
+        }
+
+        // This call refreshes the server state again and returns the exact revision file.
+        val file = downloadCurrentWallpaper(groupId)
+        val downloadedRevision = file.nameWithoutExtension
+            .removePrefix("revision-")
+            .toLongOrNull()
+            ?: error("The downloaded wallpaper revision could not be identified.")
+        device = dao.getDevice(deviceId)
+            ?: error("This device's settings are not available.")
+        if (downloadedRevision > device.lastAppliedRevision) {
+            val target = when (device.wallpaperTarget) {
+                "home" -> WallpaperTarget.HOME
+                "both" -> WallpaperTarget.BOTH
+                else -> WallpaperTarget.LOCK
+            }
+            WallpaperHelper.setWallpaperFromFile(appContext, file, target)
+            rpc(
+                "nurva_mark_revision_applied",
+                JSONObject()
+                    .put("p_group", groupId)
+                    .put("p_device", deviceId)
+                    .put("p_secret", localIdentity(session.userId, groupId).secret)
+                    .put("p_revision", downloadedRevision),
+                validSession()
+            )
+            dao.markRevisionApplied(deviceId, downloadedRevision)
+        }
+        dao.completeOperation(wallpaperApplyOperationId(groupId, downloadedRevision))
+        return downloadedRevision
+    }
+
+    private suspend fun processQueuedWallpaperApplications() {
+        val due = dao.getDueOperations(System.currentTimeMillis())
+        for (operation in due) {
+            if (operation.operationType != "apply_wallpaper") continue
+            val groupId = runCatching { JSONObject(operation.payloadJson).getString("groupId") }.getOrNull()
+            if (groupId.isNullOrBlank()) {
+                dao.completeOperation(operation.operationId)
+                continue
+            }
+            val session = currentSession() ?: return
+            val deviceId = localIndex.deviceId(session.userId, groupId)
+            if (deviceId == null) {
+                dao.completeOperation(operation.operationId)
+                continue
+            }
+            val device = dao.getDevice(deviceId) ?: continue
+            if (device.applyMode != "auto") {
+                dao.scheduleOperation(operation.operationId, Long.MAX_VALUE, "Waiting for approval")
+                continue
+            }
+            try {
+                applyLatestWallpaper(groupId)
+                dao.completeOperation(operation.operationId)
+            } catch (error: Exception) {
+                // Persist the failed operation as immediately due. WorkManager owns the
+                // exponential delay and waits for CONNECTED before attempting it again.
+                dao.recordRetry(
+                    operation.operationId,
+                    System.currentTimeMillis(),
+                    error.message?.take(500)
+                )
+                throw error
+            }
+        }
+    }
+
+    private fun wallpaperApplyOperationId(groupId: String, revision: Long): String =
+        "wallpaper_apply:$groupId:$revision"
 
     private fun imageMimeType(uri: Uri): String {
         val providerType = appContext.contentResolver.getType(uri)?.substringBefore(';')?.lowercase()
