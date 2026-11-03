@@ -3,6 +3,8 @@ package com.bnyro.wallpaper.util
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
+import java.io.File
+import java.io.FileInputStream
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.util.DisplayMetrics
@@ -53,6 +55,25 @@ object WallpaperHelper {
         withContext(Dispatchers.IO) {
             val bitmap = resizeBitmapByPreference(context, src)
             setWallpaper(context, bitmap, mode)
+        }
+    }
+
+    /** Apply a verified private Nurva download without decoding the full file into memory. */
+    suspend fun setWallpaperFromFile(context: Context, file: File, mode: WallpaperTarget) {
+        withContext(Dispatchers.IO) {
+            require(file.isFile && file.length() > 0L) { "The downloaded wallpaper file is missing." }
+            val wallpaperManager = WallpaperManager.getInstance(context)
+            check(wallpaperManager.isWallpaperSupported) { "This device does not support system wallpapers." }
+            val flags = when (mode) {
+                WallpaperTarget.BOTH -> listOf(WallpaperManager.FLAG_SYSTEM, WallpaperManager.FLAG_LOCK)
+                WallpaperTarget.HOME -> listOf(WallpaperManager.FLAG_SYSTEM)
+                WallpaperTarget.LOCK -> listOf(WallpaperManager.FLAG_LOCK)
+            }
+            flags.forEach { flag ->
+                FileInputStream(file).use { input ->
+                    wallpaperManager.setStream(input, null, true, flag)
+                }
+            }
         }
     }
 

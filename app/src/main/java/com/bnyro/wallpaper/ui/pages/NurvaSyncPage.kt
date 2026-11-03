@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -55,11 +57,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bnyro.wallpaper.db.DatabaseHolder
+import com.bnyro.wallpaper.enums.WallpaperTarget
 import com.bnyro.wallpaper.sync.auth.NurvaRepository
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.util.WallpaperHelper
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +91,29 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     var isBusy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
+
+    val wallpaperPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val groupId = selectedGroupId
+        if (uri != null && groupId.isNotBlank()) {
+            scope.launch {
+                isBusy = true
+                errorMessage = ""
+                statusMessage = ""
+                try {
+                    val revision = withContext(Dispatchers.IO) {
+                        repository.publishWallpaper(groupId, uri)
+                    }
+                    statusMessage = "Wallpaper published as revision $revision. Other devices can now download it."
+                } catch (error: Exception) {
+                    errorMessage = error.message ?: "Could not publish wallpaper."
+                } finally {
+                    isBusy = false
+                }
+            }
+        }
+    }
 
     val allGroups by dao.observeGroups().collectAsState(initial = emptyList())
     val groups = remember(allGroups, session?.userId) {
@@ -299,6 +326,52 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
 
             if (selectedGroup != null) {
                 SectionCard(title = selectedGroup.displayName, subtitle = "Revision ${selectedGroup.currentRevision} · ${members.size} members · ${devices.size} active devices") {
+                    Text("SHARED WALLPAPER", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (selectedGroup.currentRevision > 0L) "Latest published revision: ${selectedGroup.currentRevision}" else "No wallpaper has been published to this group yet.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy && signedInUserRole in setOf("owner", "admin", "editor"),
+                        onClick = {
+                            wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
+                        }
+                    ) { Text("Choose image & publish") }
+                    if (selectedGroup.currentRevision > 0L) {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isBusy,
+                            onClick = {
+                                scope.launch {
+                                    isBusy = true
+                                    errorMessage = ""
+                                    statusMessage = ""
+                                    try {
+                                        val groupId = selectedGroup.groupId
+                                        val revision = selectedGroup.currentRevision
+                                        val file = withContext(Dispatchers.IO) {
+                                            repository.downloadCurrentWallpaper(groupId)
+                                        }
+                                        val targetName = devices.firstOrNull { it.deviceId == currentDeviceId }?.wallpaperTarget
+                                        val target = when (targetName) {
+                                            "home" -> WallpaperTarget.HOME
+                                            "both" -> WallpaperTarget.BOTH
+                                            else -> WallpaperTarget.LOCK
+                                        }
+                                        WallpaperHelper.setWallpaperFromFile(context, file, target)
+                                        statusMessage = "Revision $revision downloaded, verified and applied."
+                                    } catch (error: Exception) {
+                                        errorMessage = error.message ?: "Could not download or apply the group wallpaper."
+                                    } finally {
+                                        isBusy = false
+                                    }
+                                }
+                            }
+                        ) { Text("Download & apply latest") }
+                    }
+
                     Text("INVITATIONS", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { inviteMenuExpanded = true }) { Text("Invite as: ${inviteRole.replaceFirstChar { it.uppercase() }}") }

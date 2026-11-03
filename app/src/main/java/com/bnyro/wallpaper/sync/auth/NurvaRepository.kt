@@ -1,6 +1,7 @@
 package com.bnyro.wallpaper.sync.auth
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import com.bnyro.wallpaper.BuildConfig
@@ -8,14 +9,21 @@ import com.bnyro.wallpaper.db.DatabaseHolder
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.sync.security.DeviceCredentialStore
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.util.UUID
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -211,6 +219,227 @@ class NurvaRepository(context: Context) {
         persistSnapshot(groupId, JSONObject(stateText))
     }
 
+    /**
+     * Uploads an image through a short-lived signed Storage capability, then asks the
+     * publish Edge Function to verify its actual bytes and create the next group revision.
+     */
+    suspend fun publishWallpaper(groupId: String, imageUri: Uri, title: String? = null): Long {
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        val mimeType = imageMimeType(imageUri)
+        val tempFile = File.createTempFile("nurva-upload-", ".img", appContext.cacheDir)
+        try {
+            copyImageToFile(imageUri, tempFile)
+            val dimensions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(tempFile.absolutePath, dimensions)
+            val width = dimensions.outWidth
+            val height = dimensions.outHeight
+            check(width in 1..30_000 && height in 1..30_000 && width.toLong() * height <= MAX_IMAGE_PIXELS) {
+                "This image is too large. Nurva allows up to 60 million pixels."
+            }
+
+            val assetId = UUID.randomUUID().toString()
+            val signedUpload = requestJson(
+                "/functions/v1/sign-wallpaper-upload",
+                JSONObject()
+                    .put("groupId", groupId)
+                    .put("deviceId", identity.deviceId)
+                    .put("deviceSecret", identity.secret)
+                    .put("assetId", assetId)
+                    .put("mimeType", mimeType),
+                session.accessToken
+            )
+            val uploadUrl = requireTrustedStorageUrl(signedUpload.getString("signedUrl"))
+            check(signedUpload.optString("token").isNotBlank()) {
+                "The server returned an invalid upload authorization."
+            }
+
+            val uploadRequest = Request.Builder()
+                .url(uploadUrl)
+                .put(tempFile.asRequestBody(mimeType.toMediaType()))
+                .header("apikey", publishableKey)
+                .header("Content-Type", mimeType)
+                .header("cache-control", "max-age=3600")
+                .header("x-upsert", "false")
+                .build()
+            http.newCall(uploadRequest).execute().use { response ->
+                check(response.isSuccessful) { "Wallpaper upload failed (HTTP ${response.code})." }
+            }
+
+            val published = requestJson(
+                "/functions/v1/publish-wallpaper",
+                JSONObject()
+                    .put("groupId", groupId)
+                    .put("deviceId", identity.deviceId)
+                    .put("deviceSecret", identity.secret)
+                    .put("assetId", assetId)
+                    .put("mimeType", mimeType)
+                    .put("title", title?.trim()?.take(120)),
+                session.accessToken
+            )
+
+            // The server has committed the revision. A failed follow-up read must not
+            // turn a successful publish into a misleading upload failure.
+            runCatching { refreshGroup(groupId) }
+            val publishedRevision = published.optLong("revision", 0L)
+            val currentRevision = dao.getGroup(groupId)?.currentRevision ?: 0L
+            val revision = maxOf(publishedRevision, currentRevision)
+            check(revision > 0L) {
+                "Wallpaper was published, but its revision could not be confirmed. Refresh the group."
+            }
+            return revision
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    /** Downloads the group's latest private revision and verifies its SHA-256 before saving. */
+    suspend fun downloadCurrentWallpaper(groupId: String): File {
+        refreshGroup(groupId)
+        val group = dao.getGroup(groupId) ?: error("Group information is not available.")
+        check(group.currentRevision > 0L) { "This group has not published a wallpaper yet." }
+        val revision = dao.getLatestRevision(groupId)
+            ?.takeIf { it.revision == group.currentRevision }
+            ?: error("Wallpaper metadata is not available. Refresh the group and try again.")
+
+        val extension = when (revision.mimeType) {
+            "image/jpeg" -> "jpg"
+            "image/png" -> "png"
+            "image/webp" -> "webp"
+            else -> error("The group wallpaper has an unsupported image type.")
+        }
+        val directory = File(appContext.noBackupFilesDir, "nurva-wallpapers/$groupId")
+        check(directory.isDirectory || directory.mkdirs()) { "Could not create private wallpaper storage." }
+        val destination = File(directory, "revision-${revision.revision}.$extension")
+
+        if (destination.isFile && destination.length() == revision.byteSize &&
+            sha256File(destination).equals(revision.sha256, ignoreCase = true)
+        ) {
+            dao.updateRevisionLocalState(revision.revisionId, "ready", destination.absolutePath)
+            return destination
+        }
+
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        val downloadInfo = requestJson(
+            "/functions/v1/sign-wallpaper-download",
+            JSONObject()
+                .put("groupId", groupId)
+                .put("deviceId", identity.deviceId)
+                .put("deviceSecret", identity.secret)
+                .put("revision", revision.revision),
+            session.accessToken
+        )
+        check(downloadInfo.optLong("revision") == revision.revision) {
+            "The server returned a different wallpaper revision."
+        }
+        check(downloadInfo.optString("sha256").equals(revision.sha256, ignoreCase = true)) {
+            "The server wallpaper checksum does not match the group metadata."
+        }
+        val downloadUrl = requireTrustedStorageUrl(downloadInfo.getString("url"))
+        val temporaryFile = File.createTempFile("nurva-download-", ".part", directory)
+        try {
+            val request = Request.Builder().url(downloadUrl).get().build()
+            http.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "Wallpaper download failed (HTTP ${response.code})." }
+                val input = response.body?.byteStream()
+                    ?: error("The wallpaper download returned an empty response.")
+                val digest = MessageDigest.getInstance("SHA-256")
+                var totalBytes = 0L
+                input.use { source ->
+                    FileOutputStream(temporaryFile).use { output ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            totalBytes += count
+                            check(totalBytes <= MAX_WALLPAPER_BYTES) {
+                                "Downloaded wallpaper exceeds Nurva's 50 MiB limit."
+                            }
+                            digest.update(buffer, 0, count)
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                check(totalBytes == revision.byteSize) {
+                    "Downloaded wallpaper size does not match the published revision."
+                }
+                val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+                check(actualHash.equals(revision.sha256, ignoreCase = true)) {
+                    "Wallpaper verification failed. The downloaded image was not saved."
+                }
+            }
+
+            if (destination.exists()) check(destination.delete()) { "Could not replace the cached wallpaper." }
+            check(temporaryFile.renameTo(destination)) { "Could not save the downloaded wallpaper." }
+            dao.updateRevisionLocalState(revision.revisionId, "ready", destination.absolutePath)
+            return destination
+        } finally {
+            temporaryFile.delete()
+        }
+    }
+
+    private fun imageMimeType(uri: Uri): String {
+        val providerType = appContext.contentResolver.getType(uri)?.substringBefore(';')?.lowercase()
+        if (providerType != null && providerType in SUPPORTED_IMAGE_TYPES) return providerType
+        val extension = uri.lastPathSegment?.substringAfterLast('.', "")?.lowercase()
+        return when (extension) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            else -> error("Choose a JPEG, PNG or WebP image.")
+        }
+    }
+
+    private fun copyImageToFile(uri: Uri, destination: File) {
+        val input = appContext.contentResolver.openInputStream(uri)
+            ?: error("Nurva could not open the selected image.")
+        var totalBytes = 0L
+        input.use { source ->
+            FileOutputStream(destination).use { output ->
+                val buffer = ByteArray(16 * 1024)
+                while (true) {
+                    val count = source.read(buffer)
+                    if (count < 0) break
+                    totalBytes += count
+                    check(totalBytes <= MAX_WALLPAPER_BYTES) { "Choose an image smaller than 50 MiB." }
+                    output.write(buffer, 0, count)
+                }
+            }
+        }
+        check(totalBytes > 0L) { "The selected image is empty." }
+    }
+
+    private fun sha256File(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Only HTTPS URLs on this Supabase project's own host are accepted. */
+    private fun requireTrustedStorageUrl(raw: String): String {
+        val value = raw.trim()
+        val resolved = when {
+            value.startsWith("https://", ignoreCase = true) -> value
+            value.startsWith("/storage/v1/") -> baseUrl + value
+            value.startsWith("/object/") -> "$baseUrl/storage/v1$value"
+            else -> error("The server returned an invalid Storage URL.")
+        }
+        val parsed = Uri.parse(resolved)
+        val expectedHost = Uri.parse(baseUrl).host
+        check(parsed.scheme == "https" && !expectedHost.isNullOrBlank() && parsed.host == expectedHost) {
+            "The server returned an untrusted Storage URL."
+        }
+        return resolved
+    }
+
     suspend fun revokeDevice(groupId: String, targetDeviceId: String): Boolean {
         val session = validSession()
         val identity = localIdentity(session.userId, groupId)
@@ -276,6 +505,27 @@ class NurvaRepository(context: Context) {
             )
         }
         dao.replaceRemoteSnapshot(groupEntity, members, devices)
+        if (wallpaper != null) {
+            val revisionNumber = wallpaper.getLong("revision")
+            val previous = dao.getLatestRevision(groupId)?.takeIf { it.revision == revisionNumber }
+            dao.upsertRevision(
+                SyncWallpaperRevisionEntity(
+                    revisionId = wallpaper.getString("revisionId"),
+                    groupId = groupId,
+                    revision = revisionNumber,
+                    createdByUserId = "",
+                    storagePath = wallpaper.getString("storagePath"),
+                    localFilePath = previous?.localFilePath,
+                    sha256 = wallpaper.getString("sha256"),
+                    mimeType = wallpaper.getString("mimeType"),
+                    byteSize = wallpaper.getLong("byteSize"),
+                    imageWidth = wallpaper.getInt("imageWidth"),
+                    imageHeight = wallpaper.getInt("imageHeight"),
+                    createdAt = previous?.createdAt ?: System.currentTimeMillis(),
+                    localState = previous?.localState ?: "pending_download"
+                )
+            )
+        }
     }
 
     private fun localIdentity(userId: String, groupId: String): DeviceCredentialStore.DeviceIdentity {
@@ -397,6 +647,9 @@ class NurvaRepository(context: Context) {
     }
 
     companion object {
+        private const val MAX_WALLPAPER_BYTES = 50L * 1024L * 1024L
+        private const val MAX_IMAGE_PIXELS = 60_000_000L
+        private val SUPPORTED_IMAGE_TYPES = setOf("image/jpeg", "image/png", "image/webp")
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val UUID_PATTERN = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
