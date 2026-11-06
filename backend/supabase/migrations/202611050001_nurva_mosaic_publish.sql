@@ -52,10 +52,14 @@ begin
   ) then
     raise exception 'Device is revoked or invalid' using errcode='42501';
   end if;
-  select * into upload
-    from public.nurva_pending_uploads
-    where asset_id=p_asset and group_id=p_group and user_id=p_user and device_id=p_device
-      and expires_at>now() and consumed_at is null
+  select pu.* into upload
+    from public.nurva_pending_uploads as pu
+    where pu.asset_id=p_asset
+      and pu.group_id=p_group
+      and pu.user_id=p_user
+      and pu.device_id=p_device
+      and pu.expires_at>now()
+      and pu.consumed_at is null
     for update;
   if not found then raise exception 'Pending upload invalid, expired or consumed' using errcode='22023'; end if;
   if p_hash is null or p_hash !~ '^[0-9a-f]{64}$' or p_mime is null
