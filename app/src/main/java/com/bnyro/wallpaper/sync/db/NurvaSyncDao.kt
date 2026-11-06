@@ -33,6 +33,9 @@ interface NurvaSyncDao {
     @Query("SELECT * FROM nurva_sync_devices WHERE deviceId = :deviceId LIMIT 1")
     suspend fun getDevice(deviceId: String): SyncDeviceEntity?
 
+    @Query("SELECT * FROM nurva_sync_devices WHERE groupId = :groupId AND revokedAt IS NULL ORDER BY displayName, deviceId")
+    suspend fun getActiveDevices(groupId: String): List<SyncDeviceEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDevice(device: SyncDeviceEntity)
 

@@ -10,6 +10,7 @@ import com.bnyro.wallpaper.enums.WallpaperTarget
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.sync.db.MosaicTileAssignmentEntity
 import com.bnyro.wallpaper.sync.db.SyncOutboxEntity
 import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.sync.security.DeviceCredentialStore
@@ -226,7 +227,12 @@ class NurvaRepository(context: Context) {
      * Uploads an image through a short-lived signed Storage capability, then asks the
      * publish Edge Function to verify its actual bytes and create the next group revision.
      */
-    suspend fun publishWallpaper(groupId: String, imageUri: Uri, title: String? = null): Long {
+    suspend fun publishWallpaper(
+        groupId: String,
+        imageUri: Uri,
+        title: String? = null,
+        mosaic: Boolean = false
+    ): Long {
         val session = validSession()
         val identity = localIdentity(session.userId, groupId)
         val mimeType = imageMimeType(imageUri)
@@ -241,6 +247,9 @@ class NurvaRepository(context: Context) {
                 "This image is too large. Nurva allows up to 60 million pixels."
             }
 
+            // Generate the roster-ordered tile plan before upload. The server stores it
+            // in the same transaction that creates the revision, avoiding a full-image race.
+            val mosaicTiles = if (mosaic) buildMosaicTiles(groupId) else null
             val assetId = UUID.randomUUID().toString()
             val signedUpload = requestJson(
                 "/functions/v1/sign-wallpaper-upload",
@@ -269,15 +278,17 @@ class NurvaRepository(context: Context) {
                 check(response.isSuccessful) { "Wallpaper upload failed (HTTP ${response.code})." }
             }
 
+            val publishBody = JSONObject()
+                .put("groupId", groupId)
+                .put("deviceId", identity.deviceId)
+                .put("deviceSecret", identity.secret)
+                .put("assetId", assetId)
+                .put("mimeType", mimeType)
+                .put("title", title?.trim()?.take(120))
+            if (mosaicTiles != null) publishBody.put("mosaicTiles", mosaicTiles)
             val published = requestJson(
                 "/functions/v1/publish-wallpaper",
-                JSONObject()
-                    .put("groupId", groupId)
-                    .put("deviceId", identity.deviceId)
-                    .put("deviceSecret", identity.secret)
-                    .put("assetId", assetId)
-                    .put("mimeType", mimeType)
-                    .put("title", title?.trim()?.take(120)),
+                publishBody,
                 session.accessToken
             )
 
@@ -475,7 +486,17 @@ class NurvaRepository(context: Context) {
                 "both" -> WallpaperTarget.BOTH
                 else -> WallpaperTarget.LOCK
             }
-            WallpaperHelper.setWallpaperFromFile(appContext, file, target)
+            val mosaicTile = dao.getMosaicTiles(groupId, downloadedRevision)
+                .firstOrNull { it.deviceId == deviceId }
+            if (mosaicTile == null) {
+                WallpaperHelper.setWallpaperFromFile(appContext, file, target)
+            } else {
+                WallpaperHelper.setWallpaperFromMosaicFile(
+                    appContext, file,
+                    mosaicTile.cropLeft, mosaicTile.cropTop,
+                    mosaicTile.cropRight, mosaicTile.cropBottom, target
+                )
+            }
             rpc(
                 "nurva_mark_revision_applied",
                 JSONObject()
@@ -529,6 +550,34 @@ class NurvaRepository(context: Context) {
 
     private fun wallpaperApplyOperationId(groupId: String, revision: Long): String =
         "wallpaper_apply:$groupId:$revision"
+
+    private suspend fun buildMosaicTiles(groupId: String): JSONArray {
+        val devices = dao.getActiveDevices(groupId)
+            .sortedWith(compareBy<SyncDeviceEntity> { it.displayName.lowercase() }.thenBy { it.deviceId })
+        require(devices.size in 2..100) {
+            "A panorama mosaic needs 2–100 active devices in this group. Refresh the group and try again."
+        }
+        val metrics = appContext.resources.displayMetrics
+        val outputWidth = metrics.widthPixels.coerceIn(1, 10_000)
+        val outputHeight = metrics.heightPixels.coerceIn(1, 10_000)
+        return JSONArray().apply {
+            devices.forEachIndexed { index, device ->
+                put(
+                    JSONObject()
+                        .put("deviceId", device.deviceId)
+                        .put("tileIndex", index)
+                        .put("rowIndex", 0)
+                        .put("columnIndex", index)
+                        .put("cropLeft", index.toDouble() / devices.size)
+                        .put("cropTop", 0.0)
+                        .put("cropRight", (index + 1).toDouble() / devices.size)
+                        .put("cropBottom", 1.0)
+                        .put("outputWidth", outputWidth)
+                        .put("outputHeight", outputHeight)
+                )
+            }
+        }
+    }
 
     private fun imageMimeType(uri: Uri): String {
         val providerType = appContext.contentResolver.getType(uri)?.substringBefore(';')?.lowercase()
@@ -656,6 +705,29 @@ class NurvaRepository(context: Context) {
             )
         }
         dao.replaceRemoteSnapshot(groupEntity, members, devices)
+
+        val mosaicJson = state.optJSONArray("mosaicTiles") ?: JSONArray()
+        val mosaicAssignments = (0 until mosaicJson.length()).mapNotNull { index ->
+            val item = mosaicJson.optJSONObject(index) ?: return@mapNotNull null
+            runCatching {
+                MosaicTileAssignmentEntity(
+                    groupId = groupId,
+                    revision = groupEntity.currentRevision,
+                    deviceId = item.getString("deviceId"),
+                    tileIndex = item.getInt("tileIndex"),
+                    rowIndex = item.getInt("rowIndex"),
+                    columnIndex = item.getInt("columnIndex"),
+                    cropLeft = item.getDouble("cropLeft").toFloat(),
+                    cropTop = item.getDouble("cropTop").toFloat(),
+                    cropRight = item.getDouble("cropRight").toFloat(),
+                    cropBottom = item.getDouble("cropBottom").toFloat(),
+                    outputWidth = item.getInt("outputWidth"),
+                    outputHeight = item.getInt("outputHeight")
+                )
+            }.getOrNull()
+        }
+        if (mosaicAssignments.isNotEmpty()) dao.upsertMosaicTiles(mosaicAssignments)
+
         if (wallpaper != null) {
             val revisionNumber = wallpaper.getLong("revision")
             val previous = dao.getLatestRevision(groupId)?.takeIf { it.revision == revisionNumber }

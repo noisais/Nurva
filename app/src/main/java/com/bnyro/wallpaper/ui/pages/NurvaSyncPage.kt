@@ -87,6 +87,7 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     var inviteRole by rememberSaveable { mutableStateOf("editor") }
     var inviteMenuExpanded by remember { mutableStateOf(false) }
     var createdInviteLink by remember { mutableStateOf("") }
+    var publishAsMosaic by rememberSaveable { mutableStateOf(false) }
     var isBusy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
@@ -95,6 +96,8 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         val groupId = selectedGroupId
+        val useMosaic = publishAsMosaic
+        publishAsMosaic = false
         if (uri != null && groupId.isNotBlank()) {
             scope.launch {
                 isBusy = true
@@ -102,9 +105,13 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                 statusMessage = ""
                 try {
                     val revision = withContext(Dispatchers.IO) {
-                        repository.publishWallpaper(groupId, uri)
+                        repository.publishWallpaper(groupId, uri, mosaic = useMosaic)
                     }
-                    statusMessage = "Wallpaper published as revision $revision. Other devices can now download it."
+                    statusMessage = if (useMosaic) {
+                        "Panorama mosaic published as revision $revision. Each active device receives its own horizontal slice."
+                    } else {
+                        "Wallpaper published as revision $revision. Other devices can now download it."
+                    }
                 } catch (error: Exception) {
                     errorMessage = error.message ?: "Could not publish wallpaper."
                 } finally {
@@ -337,9 +344,23 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !isBusy && signedInUserRole in setOf("owner", "admin", "editor"),
                         onClick = {
+                            publishAsMosaic = false
                             wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
                         }
-                    ) { Text("Choose image & publish") }
+                    ) { Text("Publish shared wallpaper") }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy && devices.size >= 2 && signedInUserRole in setOf("owner", "admin", "editor"),
+                        onClick = {
+                            publishAsMosaic = true
+                            wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
+                        }
+                    ) { Text("Create panorama mosaic · ${devices.size} devices") }
+                    Text(
+                        "Mosaic mode divides one wide image into equal horizontal slices, assigning one slice to each active device in the group.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     if (thisDevice != null && selectedGroup.currentRevision > thisDevice.lastAppliedRevision) {
                         Text(
                             if (thisDevice.applyMode == "manual") {

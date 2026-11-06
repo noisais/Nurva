@@ -5,9 +5,11 @@ DECLARE
   owner_device uuid := '20000000-0000-4000-8000-000000000001';
   member_device uuid := '20000000-0000-4000-8000-000000000002';
   asset_id uuid := '30000000-0000-4000-8000-000000000001';
+  mosaic_asset_id uuid := '30000000-0000-4000-8000-000000000002';
   group_id uuid;
   token text;
   published jsonb;
+  mosaic_published jsonb;
   revision_id uuid;
   theme_id uuid;
   schedule_id uuid;
@@ -36,7 +38,27 @@ BEGIN
   IF NOT EXISTS(SELECT 1 FROM public.nurva_devices WHERE id=member_device AND last_applied_revision=1) THEN RAISE EXCEPTION 'Device applied revision was not persisted'; END IF;
 
   PERFORM set_config('request.jwt.claim.sub',owner_id::text,false);
+  INSERT INTO storage.objects(bucket_id,name) VALUES('nurva-wallpapers',group_id::text||'/'||mosaic_asset_id::text);
+  INSERT INTO public.nurva_pending_uploads(asset_id,group_id,user_id,device_id,storage_path,expires_at)
+    VALUES(mosaic_asset_id,group_id,owner_id,owner_device,group_id::text||'/'||mosaic_asset_id::text,now()+interval '2 hours');
+  mosaic_published := public.nurva_publish_wallpaper_revision_mosaic(
+    group_id,owner_device,owner_id,mosaic_asset_id,repeat('d',64),'image/png',24,8,4,'Panorama test',
+    jsonb_build_array(
+      jsonb_build_object('deviceId',owner_device::text,'tileIndex',0,'rowIndex',0,'columnIndex',0,
+        'cropLeft',0,'cropTop',0,'cropRight',0.5,'cropBottom',1,'outputWidth',1080,'outputHeight',2400),
+      jsonb_build_object('deviceId',member_device::text,'tileIndex',1,'rowIndex',0,'columnIndex',1,
+        'cropLeft',0.5,'cropTop',0,'cropRight',1,'cropBottom',1,'outputWidth',1440,'outputHeight',3200)
+    )
+  );
+  IF (mosaic_published->>'revision')::bigint<>2 OR mosaic_published->>'mosaic'<>'true' THEN
+    RAISE EXCEPTION 'Atomic mosaic revision was not published';
+  END IF;
+  IF (SELECT count(*) FROM public.nurva_mosaic_tiles mt WHERE mt.group_id IN (SELECT g.id FROM public.nurva_groups g WHERE g.owner_user_id=owner_id AND g.display_name='SQL smoke test') AND mt.revision=2)<>2 THEN
+    RAISE EXCEPTION 'Atomic mosaic tile assignments were not stored';
+  END IF;
+
   sync_state := public.nurva_get_sync_state(group_id,owner_device,repeat('a',64));
+  IF jsonb_array_length(sync_state->'mosaicTiles')<>2 THEN RAISE EXCEPTION 'Mosaic tiles missing from sync state'; END IF;
   IF NOT EXISTS(SELECT 1 FROM public.nurva_devices WHERE id=owner_device AND last_seen_at IS NOT NULL) THEN
     RAISE EXCEPTION 'Sync-state refresh did not update the device last-seen timestamp';
   END IF;

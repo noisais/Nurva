@@ -3,6 +3,9 @@ package com.bnyro.wallpaper.util
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Rect
 import java.io.File
 import java.io.FileInputStream
 import android.hardware.display.DisplayManager
@@ -17,6 +20,7 @@ import com.bnyro.wallpaper.enums.ResizeMethod
 import com.bnyro.wallpaper.enums.WallpaperTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.ceil
 
 object WallpaperHelper {
     private const val LIGHT_BRIGHTNESS_MIN = 0.8f
@@ -73,6 +77,62 @@ object WallpaperHelper {
                 FileInputStream(file).use { input ->
                     wallpaperManager.setStream(input, null, true, flag)
                 }
+            }
+        }
+    }
+
+    /** Decode and apply only this device's verified panorama slice. */
+    suspend fun setWallpaperFromMosaicFile(
+        context: Context,
+        file: File,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
+        mode: WallpaperTarget
+    ) {
+        withContext(Dispatchers.IO) {
+            require(file.isFile && file.length() > 0L) { "The downloaded mosaic image is missing." }
+            require(cropLeft >= 0f && cropTop >= 0f && cropRight <= 1f && cropBottom <= 1f &&
+                cropLeft < cropRight && cropTop < cropBottom) { "The mosaic tile bounds are invalid." }
+            val decoder = BitmapRegionDecoder.newInstance(file.absolutePath, false)
+                ?: error("Nurva could not read the panorama image.")
+            try {
+                val sourceWidth = decoder.width
+                val sourceHeight = decoder.height
+                val left = (sourceWidth * cropLeft).toInt().coerceIn(0, sourceWidth - 1)
+                val top = (sourceHeight * cropTop).toInt().coerceIn(0, sourceHeight - 1)
+                val right = ceil(sourceWidth * cropRight).toInt().coerceIn(left + 1, sourceWidth)
+                val bottom = ceil(sourceHeight * cropBottom).toInt().coerceIn(top + 1, sourceHeight)
+                val region = Rect(left, top, right, bottom)
+                val (targetWidth, targetHeight) = getMetrics(context)
+                val sampleLimit = minOf(
+                    region.width() / targetWidth.coerceAtLeast(1),
+                    region.height() / targetHeight.coerceAtLeast(1)
+                ).coerceAtLeast(1)
+                var sampleSize = 1
+                while (sampleSize <= sampleLimit / 2) sampleSize *= 2
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
+                val tileBitmap = decoder.decodeRegion(region, options)
+                    ?: error("Nurva could not decode this device's panorama slice.")
+                try {
+                    val resized = resizeBitmapByPreference(context, tileBitmap)
+                    try {
+                        check(WallpaperManager.getInstance(context).isWallpaperSupported) {
+                            "This device does not support system wallpapers."
+                        }
+                        setWallpaper(context, resized, mode)
+                    } finally {
+                        if (resized !== tileBitmap) resized.recycle()
+                    }
+                } finally {
+                    tileBitmap.recycle()
+                }
+            } finally {
+                decoder.recycle()
             }
         }
     }

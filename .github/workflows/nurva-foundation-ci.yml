@@ -116,6 +116,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611020001_nurva_applied_revision.sql
+      - name: Add atomic panorama-mosaic publishing RPC
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611050001_nurva_mosaic_publish.sql
       - name: Smoke-test group, invite, device permissions, revision, theme, schedule and revocation flows
         env:
           PGPASSWORD: postgres
