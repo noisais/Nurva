@@ -88,6 +88,8 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     var inviteMenuExpanded by remember { mutableStateOf(false) }
     var createdInviteLink by remember { mutableStateOf("") }
     var publishAsMosaic by rememberSaveable { mutableStateOf(false) }
+    var showMosaicOrderDialog by remember { mutableStateOf(false) }
+    var mosaicDeviceOrder by remember { mutableStateOf(emptyList<String>()) }
     var isBusy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
@@ -105,7 +107,10 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                 statusMessage = ""
                 try {
                     val revision = withContext(Dispatchers.IO) {
-                        repository.publishWallpaper(groupId, uri, mosaic = useMosaic)
+                        repository.publishWallpaper(
+                            groupId, uri, mosaic = useMosaic,
+                            mosaicDeviceOrder = mosaicDeviceOrder.takeIf { useMosaic }
+                        )
                     }
                     statusMessage = if (useMosaic) {
                         "Panorama mosaic published as revision $revision. Each active device receives its own horizontal slice."
@@ -134,6 +139,10 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     }
     val members by membersFlow.collectAsState(initial = emptyList())
     val devices by devicesFlow.collectAsState(initial = emptyList())
+    val activeDevices = remember(devices) {
+        devices.filter { it.revokedAt == null }
+            .sortedWith(compareBy<SyncDeviceEntity> { it.displayName.lowercase() }.thenBy { it.deviceId })
+    }
     val selectedGroup = groups.firstOrNull { it.groupId == selectedGroupId }
     val signedInUserRole = members.firstOrNull { it.userId == session?.userId }?.role
     val currentDeviceId = selectedGroupId.takeIf { it.isNotBlank() }?.let(repository::currentDeviceId)
@@ -350,14 +359,14 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                     ) { Text("Publish shared wallpaper") }
                     OutlinedButton(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !isBusy && devices.size >= 2 && signedInUserRole in setOf("owner", "admin", "editor"),
+                        enabled = !isBusy && activeDevices.size in 2..100 && signedInUserRole in setOf("owner", "admin", "editor"),
                         onClick = {
-                            publishAsMosaic = true
-                            wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
+                            mosaicDeviceOrder = activeDevices.map { it.deviceId }
+                            showMosaicOrderDialog = true
                         }
-                    ) { Text("Create panorama mosaic · ${devices.size} devices") }
+                    ) { Text("Arrange panorama · ${activeDevices.size} devices") }
                     Text(
-                        "Mosaic mode divides one wide image into equal horizontal slices, assigning one slice to each active device in the group.",
+                        "Choose the left-to-right order of devices before selecting a panorama. Each device receives its matching slice.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -526,6 +535,20 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
         }
         OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = onBrowseWallpapers) { Text("Browse wallpapers") }
         Spacer(Modifier.height(8.dp))
+    }
+
+    if (showMosaicOrderDialog && selectedGroup != null) {
+        NurvaMosaicOrderDialog(
+            devices = activeDevices,
+            initialOrder = mosaicDeviceOrder,
+            onDismiss = { showMosaicOrderDialog = false },
+            onConfirm = { orderedIds ->
+                mosaicDeviceOrder = orderedIds
+                showMosaicOrderDialog = false
+                publishAsMosaic = true
+                wallpaperPicker.launch(arrayOf("image/jpeg", "image/png", "image/webp"))
+            }
+        )
     }
 }
 

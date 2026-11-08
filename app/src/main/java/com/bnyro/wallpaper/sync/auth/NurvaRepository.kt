@@ -231,7 +231,8 @@ class NurvaRepository(context: Context) {
         groupId: String,
         imageUri: Uri,
         title: String? = null,
-        mosaic: Boolean = false
+        mosaic: Boolean = false,
+        mosaicDeviceOrder: List<String>? = null
     ): Long {
         val session = validSession()
         val identity = localIdentity(session.userId, groupId)
@@ -249,7 +250,7 @@ class NurvaRepository(context: Context) {
 
             // Generate the roster-ordered tile plan before upload. The server stores it
             // in the same transaction that creates the revision, avoiding a full-image race.
-            val mosaicTiles = if (mosaic) buildMosaicTiles(groupId) else null
+            val mosaicTiles = if (mosaic) buildMosaicTiles(groupId, mosaicDeviceOrder) else null
             val assetId = UUID.randomUUID().toString()
             val signedUpload = requestJson(
                 "/functions/v1/sign-wallpaper-upload",
@@ -551,12 +552,11 @@ class NurvaRepository(context: Context) {
     private fun wallpaperApplyOperationId(groupId: String, revision: Long): String =
         "wallpaper_apply:$groupId:$revision"
 
-    private suspend fun buildMosaicTiles(groupId: String): JSONArray {
-        val devices = dao.getActiveDevices(groupId)
-            .sortedWith(compareBy<SyncDeviceEntity> { it.displayName.lowercase() }.thenBy { it.deviceId })
-        require(devices.size in 2..100) {
-            "A panorama mosaic needs 2–100 active devices in this group. Refresh the group and try again."
-        }
+    private suspend fun buildMosaicTiles(
+        groupId: String,
+        requestedDeviceOrder: List<String>?
+    ): JSONArray {
+        val devices = orderMosaicDevices(dao.getActiveDevices(groupId), requestedDeviceOrder)
         val metrics = appContext.resources.displayMetrics
         val outputWidth = metrics.widthPixels.coerceIn(1, 10_000)
         val outputHeight = metrics.heightPixels.coerceIn(1, 10_000)
