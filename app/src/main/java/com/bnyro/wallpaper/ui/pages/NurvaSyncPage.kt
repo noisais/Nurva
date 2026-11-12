@@ -57,14 +57,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bnyro.wallpaper.db.DatabaseHolder
+import com.bnyro.wallpaper.sync.auth.deviceLastSeenLabel
+import com.bnyro.wallpaper.sync.auth.deviceSyncStatusLabel
 import com.bnyro.wallpaper.sync.auth.NurvaRepository
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
 import com.bnyro.wallpaper.util.NurvaSyncWorker
-import java.text.DateFormat
-import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -495,6 +495,7 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                         }
                         DeviceRow(
                             device = device,
+                            currentRevision = selectedGroup.currentRevision,
                             role = role,
                             isThisDevice = device.deviceId == currentDeviceId,
                             canRevoke = canRevokeDevice,
@@ -672,7 +673,7 @@ private fun DeviceSyncPreferences(
 }
 
 @Composable
-private fun DeviceRow(device: SyncDeviceEntity, role: String, isThisDevice: Boolean, canRevoke: Boolean, onRevoke: () -> Unit) {
+private fun DeviceRow(device: SyncDeviceEntity, currentRevision: Long, role: String, isThisDevice: Boolean, canRevoke: Boolean, onRevoke: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -680,11 +681,24 @@ private fun DeviceRow(device: SyncDeviceEntity, role: String, isThisDevice: Bool
                 if (isThisDevice) Text("THIS DEVICE", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
             }
             Text("${role.replaceFirstChar { it.uppercase() }} · ${device.wallpaperTarget} screen · ${device.applyMode} apply", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("Last applied revision ${device.lastAppliedRevision}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            val lastSeen = device.lastSeenAt?.takeIf { it > 0L }?.let {
-                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))
-            } ?: "No check-in recorded yet"
-            Text("Last check-in: $lastSeen", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val syncStatus = deviceSyncStatusLabel(currentRevision, device.lastAppliedRevision, device.applyMode)
+            Text(
+                "Sync status: $syncStatus",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (syncStatus == "Up to date") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (currentRevision > 0L) {
+                Text(
+                    "Applied revision ${device.lastAppliedRevision} of $currentRevision",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                "Last check-in: ${deviceLastSeenLabel(device.lastSeenAt, System.currentTimeMillis())}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (canRevoke) TextButton(onClick = onRevoke) { Text("Revoke device access", color = MaterialTheme.colorScheme.error) }
         }
     }
