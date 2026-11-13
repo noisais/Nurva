@@ -107,6 +107,9 @@ interface NurvaSyncDao {
     @Query("SELECT * FROM nurva_sync_schedules WHERE groupId = :groupId ORDER BY localHour, localMinute")
     fun observeSchedules(groupId: String): Flow<List<SyncScheduleEntity>>
 
+    @Query("SELECT * FROM nurva_sync_outbox WHERE groupId = :groupId ORDER BY createdAt DESC")
+    fun observeOperations(groupId: String): Flow<List<SyncOutboxEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun enqueue(operation: SyncOutboxEntity)
 
