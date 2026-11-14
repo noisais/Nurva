@@ -67,6 +67,12 @@ interface NurvaSyncDao {
     @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId ORDER BY revision DESC LIMIT 1")
     suspend fun getLatestRevision(groupId: String): SyncWallpaperRevisionEntity?
 
+    @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId ORDER BY revision DESC")
+    suspend fun getRevisions(groupId: String): List<SyncWallpaperRevisionEntity>
+
+    @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId ORDER BY revision DESC")
+    fun observeRevisions(groupId: String): Flow<List<SyncWallpaperRevisionEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertRevision(revision: SyncWallpaperRevisionEntity)
 
@@ -81,6 +87,9 @@ interface NurvaSyncDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertTheme(theme: SyncThemeEntity)
+
+    @Query("SELECT * FROM nurva_themes WHERE groupId = :groupId AND themeId = :themeId LIMIT 1")
+    suspend fun getTheme(groupId: String, themeId: String): SyncThemeEntity?
 
     @Query("SELECT * FROM nurva_themes WHERE groupId = :groupId ORDER BY updatedAt DESC")
     fun observeThemes(groupId: String): Flow<List<SyncThemeEntity>>

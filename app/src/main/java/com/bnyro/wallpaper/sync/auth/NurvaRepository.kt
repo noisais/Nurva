@@ -12,6 +12,8 @@ import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
 import com.bnyro.wallpaper.sync.db.MosaicTileAssignmentEntity
 import com.bnyro.wallpaper.sync.db.SyncOutboxEntity
+import com.bnyro.wallpaper.sync.db.SyncThemeEntity
+import com.bnyro.wallpaper.sync.db.SyncThemeItemEntity
 import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.sync.security.DeviceCredentialStore
 import com.bnyro.wallpaper.util.WallpaperHelper
@@ -663,6 +665,104 @@ class NurvaRepository(context: Context) {
         return localIndex.deviceId(session.userId, groupId)
     }
 
+    /** Saves 1–100 locally known wallpaper revisions as a shared group theme. */
+    suspend fun saveSharedTheme(groupId: String, rawName: String, revisionIds: List<String>): String {
+        val name = normalizedSharedThemeName(rawName)
+        require(revisionIds.size in 1..100 && revisionIds.distinct().size == revisionIds.size) {
+            "Choose between 1 and 100 different wallpaper revisions."
+        }
+        if (dao.getGroup(groupId) == null) refreshGroup(groupId)
+        val revisionsById = dao.getRevisions(groupId).associateBy { it.revisionId }
+        val selectedRevisions = revisionIds.map { id ->
+            revisionsById[id] ?: error("A selected wallpaper revision is no longer available. Refresh the group and try again.")
+        }
+
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        val themeId = UUID.randomUUID().toString()
+        val items = JSONArray().apply {
+            selectedRevisions.forEach { revision ->
+                put(JSONObject().put("revisionId", revision.revisionId))
+            }
+        }
+        val rawResult = rpc(
+            "nurva_save_theme",
+            JSONObject()
+                .put("p_group", groupId)
+                .put("p_device", identity.deviceId)
+                .put("p_secret", identity.secret)
+                .put("p_theme", themeId)
+                .put("p_name", name)
+                .put("p_layout", "shared")
+                .put("p_items", items)
+                .put("p_activate", true),
+            session
+        )
+        val returnedId = rawResult.trim().removeSurrounding("\"")
+        check(returnedId.equals(themeId, ignoreCase = true)) {
+            "The server saved the theme but returned an unexpected theme ID. Refresh the group."
+        }
+
+        val now = System.currentTimeMillis()
+        dao.upsertTheme(
+            SyncThemeEntity(
+                themeId = themeId,
+                groupId = groupId,
+                name = name,
+                layoutMode = "shared",
+                description = null,
+                createdAt = now,
+                updatedAt = now
+            )
+        )
+        dao.replaceThemeItems(
+            themeId,
+            selectedRevisions.mapIndexed { index, revision ->
+                SyncThemeItemEntity(themeId, index, revision.revisionId, null)
+            }
+        )
+        dao.getGroup(groupId)?.let { dao.upsertGroup(it.copy(currentThemeId = themeId, updatedAt = now)) }
+        // The RPC commit is authoritative; a failed refresh must not imply the save failed.
+        runCatching { refreshGroup(groupId) }
+        return themeId
+    }
+
+    /** Selects an existing shared theme. Selection updates metadata; device wallpaper apply is separate. */
+    suspend fun activateSharedTheme(groupId: String, themeId: String) {
+        val theme = dao.getTheme(groupId, themeId)
+            ?: error("That shared theme is not available locally. Refresh the group and try again.")
+        val savedItems = dao.getThemeItems(themeId)
+        require(savedItems.isNotEmpty()) { "This shared theme has no wallpaper items." }
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        val items = JSONArray().apply {
+            savedItems.forEach { item ->
+                put(JSONObject().put("revisionId", item.revisionId).apply {
+                    item.deviceId?.let { put("deviceId", it) }
+                })
+            }
+        }
+        val rawResult = rpc(
+            "nurva_save_theme",
+            JSONObject()
+                .put("p_group", groupId)
+                .put("p_device", identity.deviceId)
+                .put("p_secret", identity.secret)
+                .put("p_theme", themeId)
+                .put("p_name", theme.name)
+                .put("p_layout", theme.layoutMode)
+                .put("p_items", items)
+                .put("p_activate", true),
+            session
+        )
+        check(rawResult.trim().removeSurrounding("\"").equals(themeId, ignoreCase = true)) {
+            "The server did not confirm the selected theme. Refresh the group."
+        }
+        val now = System.currentTimeMillis()
+        dao.getGroup(groupId)?.let { dao.upsertGroup(it.copy(currentThemeId = themeId, updatedAt = now)) }
+        runCatching { refreshGroup(groupId) }
+    }
+
     private suspend fun persistSnapshot(groupId: String, state: JSONObject) {
         val group = state.getJSONObject("group")
         val wallpaper = state.optJSONObject("currentWallpaper")
@@ -748,6 +848,41 @@ class NurvaRepository(context: Context) {
                     localState = previous?.localState ?: "pending_download"
                 )
             )
+        }
+        // Mirror shared themes and their revision references into Room for offline display.
+        val themesJson = state.optJSONArray("themes") ?: JSONArray()
+        for (themeIndex in 0 until themesJson.length()) {
+            val themeJson = themesJson.optJSONObject(themeIndex) ?: continue
+            val themeId = themeJson.optString("id").takeIf { it.isNotBlank() } ?: continue
+            val previousTheme = dao.getTheme(groupId, themeId)
+            val now = System.currentTimeMillis()
+            dao.upsertTheme(
+                SyncThemeEntity(
+                    themeId = themeId,
+                    groupId = groupId,
+                    name = themeJson.optString("name", "Shared theme").take(80),
+                    layoutMode = themeJson.optString("layoutMode", "shared")
+                        .takeIf { it in setOf("shared", "per_device", "mosaic") } ?: "shared",
+                    description = themeJson.optString("description")
+                        .takeIf { it.isNotBlank() && it != "null" },
+                    createdAt = previousTheme?.createdAt ?: now,
+                    updatedAt = now
+                )
+            )
+            val themeItemJson = themeJson.optJSONArray("items") ?: JSONArray()
+            val themeItems = (0 until themeItemJson.length()).mapNotNull { itemIndex ->
+                val themeItem = themeItemJson.optJSONObject(itemIndex) ?: return@mapNotNull null
+                val revisionId = themeItem.optString("revisionId").takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                SyncThemeItemEntity(
+                    themeId = themeId,
+                    position = themeItem.optInt("position", itemIndex),
+                    revisionId = revisionId,
+                    deviceId = themeItem.optString("deviceId")
+                        .takeIf { it.isNotBlank() && it != "null" }
+                )
+            }
+            dao.replaceThemeItems(themeId, themeItems)
         }
     }
 

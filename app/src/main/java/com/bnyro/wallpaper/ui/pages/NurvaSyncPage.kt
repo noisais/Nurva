@@ -64,6 +64,8 @@ import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.sync.db.SyncThemeEntity
+import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.util.NurvaSyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
@@ -93,6 +95,8 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     var isBusy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
+    var sharedThemeName by rememberSaveable { mutableStateOf("") }
+    var selectedThemeRevisionIds by remember(selectedGroupId) { mutableStateOf(emptyList<String>()) }
 
     val wallpaperPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -139,6 +143,14 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     }
     val members by membersFlow.collectAsState(initial = emptyList())
     val devices by devicesFlow.collectAsState(initial = emptyList())
+    val themesFlow = remember(selectedGroupId) {
+        if (selectedGroupId.isBlank()) flowOf(emptyList<SyncThemeEntity>()) else dao.observeThemes(selectedGroupId)
+    }
+    val themes by themesFlow.collectAsState(initial = emptyList())
+    val revisionsFlow = remember(selectedGroupId) {
+        if (selectedGroupId.isBlank()) flowOf(emptyList<SyncWallpaperRevisionEntity>()) else dao.observeRevisions(selectedGroupId)
+    }
+    val revisions by revisionsFlow.collectAsState(initial = emptyList())
     val activeDevices = remember(devices) {
         devices.filter { it.revokedAt == null }
             .sortedWith(compareBy<SyncDeviceEntity> { it.displayName.lowercase() }.thenBy { it.deviceId })
@@ -150,6 +162,13 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
 
     LaunchedEffect(selectedGroupId) {
         createdInviteLink = ""
+    }
+    LaunchedEffect(selectedGroupId, revisions) {
+        val availableIds = revisions.map { it.revisionId }.toSet()
+        selectedThemeRevisionIds = selectedThemeRevisionIds.filter { it in availableIds }
+        if (selectedThemeRevisionIds.isEmpty() && revisions.isNotEmpty()) {
+            selectedThemeRevisionIds = listOf(revisions.first().revisionId)
+        }
     }
     LaunchedEffect(groups) {
         if (groups.isNotEmpty() && groups.none { it.groupId == selectedGroupId }) {
@@ -431,6 +450,110 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                             Text(if (thisDevice?.applyMode == "manual") "Approve & apply latest" else "Apply latest now")
                         }
                     }
+
+                    // SHARED_THEMES_UI_BEGIN
+                    Text("SHARED THEMES", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Build a shared theme from wallpaper revisions already known on this device, then select the group's active theme.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = sharedThemeName,
+                        onValueChange = { sharedThemeName = it.take(80) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("New theme name") },
+                        singleLine = true,
+                        supportingText = { Text("Select one or more published revisions below.") }
+                    )
+                    if (revisions.isEmpty()) {
+                        Text("No published wallpaper revisions are cached yet. Publish a wallpaper and refresh the group first.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        revisions.forEach { revision ->
+                            val selected = revision.revisionId in selectedThemeRevisionIds
+                            OutlinedButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isBusy,
+                                onClick = {
+                                    selectedThemeRevisionIds = if (selected) {
+                                        selectedThemeRevisionIds.filterNot { it == revision.revisionId }
+                                    } else {
+                                        selectedThemeRevisionIds + revision.revisionId
+                                    }
+                                }
+                            ) {
+                                Text("${if (selected) "✓  " else "＋  "}Revision ${revision.revision} · ${revision.imageWidth}×${revision.imageHeight}")
+                            }
+                        }
+                    }
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy && selectedThemeRevisionIds.isNotEmpty() &&
+                            selectedThemeRevisionIds.size <= 100 &&
+                            sharedThemeName.trim().isNotEmpty() &&
+                            signedInUserRole in setOf("owner", "admin", "editor"),
+                        onClick = {
+                            scope.launch {
+                                isBusy = true
+                                errorMessage = ""
+                                statusMessage = ""
+                                try {
+                                    val savedName = sharedThemeName.trim()
+                                    val revisionIds = selectedThemeRevisionIds.toList()
+                                    withContext(Dispatchers.IO) {
+                                        repository.saveSharedTheme(selectedGroup.groupId, savedName, revisionIds)
+                                    }
+                                    sharedThemeName = ""
+                                    statusMessage = "Shared theme '$savedName' saved and selected for this group. Theme selection does not automatically apply or rotate wallpapers yet."
+                                } catch (error: Exception) {
+                                    errorMessage = error.message ?: "Could not save the shared theme."
+                                } finally {
+                                    isBusy = false
+                                }
+                            }
+                        }
+                    ) { Text("Create and activate shared theme") }
+                    if (themes.isEmpty()) {
+                        Text("No shared themes saved yet.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        themes.forEach { theme ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(theme.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                    Text(theme.layoutMode.replace('_', ' '), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (selectedGroup.currentThemeId == theme.themeId) {
+                                    Text("ACTIVE", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                } else {
+                                    TextButton(
+                                        enabled = !isBusy && signedInUserRole in setOf("owner", "admin", "editor"),
+                                        onClick = {
+                                            scope.launch {
+                                                isBusy = true
+                                                errorMessage = ""
+                                                statusMessage = ""
+                                                try {
+                                                    withContext(Dispatchers.IO) {
+                                                        repository.activateSharedTheme(selectedGroup.groupId, theme.themeId)
+                                                    }
+                                                    statusMessage = "'${theme.name}' is now the selected group theme. Wallpaper application is still controlled by each device's sync settings."
+                                                } catch (error: Exception) {
+                                                    errorMessage = error.message ?: "Could not select this theme."
+                                                } finally {
+                                                    isBusy = false
+                                                }
+                                            }
+                                        }
+                                    ) { Text("Select") }
+                                }
+                            }
+                        }
+                    }
+                    // SHARED_THEMES_UI_END
 
                     Text("INVITATIONS", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
