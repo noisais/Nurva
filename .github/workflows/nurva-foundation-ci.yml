@@ -120,6 +120,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611050001_nurva_mosaic_publish.sql
+      - name: Apply scheduled theme execution migration
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f backend/supabase/migrations/202611130001_nurva_scheduled_theme_changes.sql
       - name: Smoke-test group, invite, device permissions, revision, theme, schedule and revocation flows
         env:
           PGPASSWORD: postgres

@@ -60,10 +60,13 @@ import com.bnyro.wallpaper.db.DatabaseHolder
 import com.bnyro.wallpaper.sync.auth.deviceLastSeenLabel
 import com.bnyro.wallpaper.sync.auth.deviceSyncStatusLabel
 import com.bnyro.wallpaper.sync.auth.NurvaRepository
+import com.bnyro.wallpaper.sync.auth.nurvaScheduleDaysLabel
+import com.bnyro.wallpaper.sync.auth.parseNurvaScheduleTime
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
+import com.bnyro.wallpaper.sync.db.SyncScheduleEntity
 import com.bnyro.wallpaper.sync.db.SyncThemeEntity
 import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
 import com.bnyro.wallpaper.util.NurvaSyncWorker
@@ -71,6 +74,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
@@ -97,6 +103,10 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
     var statusMessage by remember { mutableStateOf("") }
     var sharedThemeName by rememberSaveable { mutableStateOf("") }
     var selectedThemeRevisionIds by remember(selectedGroupId) { mutableStateOf(emptyList<String>()) }
+    var scheduleThemeId by rememberSaveable(selectedGroupId) { mutableStateOf("") }
+    var scheduleTime by rememberSaveable(selectedGroupId) { mutableStateOf("09:00") }
+    var scheduleDaysMask by rememberSaveable(selectedGroupId) { mutableStateOf(127) }
+    var scheduleThemeMenuExpanded by remember { mutableStateOf(false) }
 
     val wallpaperPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -151,6 +161,11 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
         if (selectedGroupId.isBlank()) flowOf(emptyList<SyncWallpaperRevisionEntity>()) else dao.observeRevisions(selectedGroupId)
     }
     val revisions by revisionsFlow.collectAsState(initial = emptyList())
+    val schedulesFlow = remember(selectedGroupId) {
+        if (selectedGroupId.isBlank()) flowOf(emptyList<SyncScheduleEntity>()) else dao.observeSchedules(selectedGroupId)
+    }
+    val schedules by schedulesFlow.collectAsState(initial = emptyList())
+    val schedulableThemes = remember(themes) { themes.filter { it.layoutMode == "shared" } }
     val activeDevices = remember(devices) {
         devices.filter { it.revokedAt == null }
             .sortedWith(compareBy<SyncDeviceEntity> { it.displayName.lowercase() }.thenBy { it.deviceId })
@@ -162,6 +177,11 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
 
     LaunchedEffect(selectedGroupId) {
         createdInviteLink = ""
+    }
+    LaunchedEffect(selectedGroupId, schedulableThemes) {
+        if (schedulableThemes.none { it.themeId == scheduleThemeId }) {
+            scheduleThemeId = schedulableThemes.firstOrNull()?.themeId.orEmpty()
+        }
     }
     LaunchedEffect(selectedGroupId, revisions) {
         val availableIds = revisions.map { it.revisionId }.toSet()
@@ -554,6 +574,177 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                         }
                     }
                     // SHARED_THEMES_UI_END
+
+
+
+                    // SCHEDULED_SHARED_THEME_CHANGES_BEGIN
+                    Text("SCHEDULED THEME CHANGES", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Set a weekly time for this group to activate a shared theme. Connected devices check schedules during background sync; Auto devices apply the theme's first wallpaper. Manual devices can apply it below. Times use the schedule's saved time zone.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (schedulableThemes.isEmpty()) {
+                        Text("Create a shared theme before scheduling a change.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { scheduleThemeMenuExpanded = true }) {
+                                Text("Theme: ${schedulableThemes.firstOrNull { it.themeId == scheduleThemeId }?.name ?: "Choose theme"}")
+                            }
+                            DropdownMenu(expanded = scheduleThemeMenuExpanded, onDismissRequest = { scheduleThemeMenuExpanded = false }) {
+                                schedulableThemes.forEach { theme ->
+                                    DropdownMenuItem(
+                                        text = { Text(theme.name) },
+                                        onClick = { scheduleThemeId = theme.themeId; scheduleThemeMenuExpanded = false }
+                                    )
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = scheduleTime,
+                            onValueChange = { scheduleTime = it.take(5) },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Local time (24-hour HH:mm)") },
+                            singleLine = true,
+                            supportingText = { Text("Time zone: ${ZoneId.systemDefault().id}") }
+                        )
+                        val dayChoices = listOf("Mon" to 1, "Tue" to 2, "Wed" to 4, "Thu" to 8, "Fri" to 16, "Sat" to 32, "Sun" to 64)
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                dayChoices.take(4).forEach { (label, bit) ->
+                                    OutlinedButton(
+                                        enabled = !isBusy,
+                                        onClick = { scheduleDaysMask = scheduleDaysMask xor bit }
+                                    ) { Text(if (scheduleDaysMask and bit != 0) "✓ $label" else label) }
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                dayChoices.drop(4).forEach { (label, bit) ->
+                                    OutlinedButton(
+                                        enabled = !isBusy,
+                                        onClick = { scheduleDaysMask = scheduleDaysMask xor bit }
+                                    ) { Text(if (scheduleDaysMask and bit != 0) "✓ $label" else label) }
+                                }
+                            }
+                        }
+                        val parsedScheduleTime = runCatching { parseNurvaScheduleTime(scheduleTime) }.getOrNull()
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isBusy && scheduleThemeId.isNotBlank() && scheduleDaysMask in 1..127 &&
+                                parsedScheduleTime != null && signedInUserRole in setOf("owner", "admin", "editor"),
+                            onClick = {
+                                scope.launch {
+                                    isBusy = true
+                                    errorMessage = ""
+                                    statusMessage = ""
+                                    try {
+                                        val (hour, minute) = parseNurvaScheduleTime(scheduleTime)
+                                        withContext(Dispatchers.IO) {
+                                            repository.saveSharedThemeSchedule(
+                                                groupId = selectedGroup.groupId,
+                                                scheduleId = null,
+                                                themeId = scheduleThemeId,
+                                                daysOfWeekMask = scheduleDaysMask,
+                                                localHour = hour,
+                                                localMinute = minute,
+                                                timeZoneId = ZoneId.systemDefault().id,
+                                                enabled = true
+                                            )
+                                        }
+                                        statusMessage = "Weekly shared-theme schedule saved. Connected devices will activate it during their next eligible background sync."
+                                    } catch (error: Exception) {
+                                        errorMessage = error.message ?: "Could not save the theme schedule."
+                                    } finally {
+                                        isBusy = false
+                                    }
+                                }
+                            }
+                        ) { Text("Save weekly schedule") }
+                    }
+                    if (schedules.isEmpty()) {
+                        Text("No weekly theme schedules yet.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        schedules.forEach { schedule ->
+                            val themeName = themes.firstOrNull { it.themeId == schedule.themeId }?.name ?: "Unavailable theme"
+                            val nextRun = schedule.nextRunAt?.let { timestamp ->
+                                runCatching {
+                                    Instant.ofEpochMilli(timestamp)
+                                        .atZone(ZoneId.of(schedule.timeZoneId))
+                                        .format(DateTimeFormatter.ofPattern("EEE, MMM d · HH:mm"))
+                                }.getOrNull()
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(themeName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "${nurvaScheduleDaysLabel(schedule.daysOfWeekMask)} · ${"%02d:%02d".format(schedule.localHour, schedule.localMinute)} · ${schedule.timeZoneId}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            if (!schedule.enabled) "Paused" else "Next: ${nextRun ?: "Pending sync"}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    TextButton(
+                                        enabled = !isBusy && signedInUserRole in setOf("owner", "admin", "editor"),
+                                        onClick = {
+                                            scope.launch {
+                                                isBusy = true
+                                                errorMessage = ""
+                                                statusMessage = ""
+                                                try {
+                                                    withContext(Dispatchers.IO) {
+                                                        repository.saveSharedThemeSchedule(
+                                                            groupId = selectedGroup.groupId,
+                                                            scheduleId = schedule.scheduleId,
+                                                            themeId = schedule.themeId ?: error("This schedule has no theme."),
+                                                            daysOfWeekMask = schedule.daysOfWeekMask,
+                                                            localHour = schedule.localHour,
+                                                            localMinute = schedule.localMinute,
+                                                            timeZoneId = schedule.timeZoneId,
+                                                            enabled = !schedule.enabled
+                                                        )
+                                                    }
+                                                    statusMessage = if (schedule.enabled) "Schedule paused." else "Schedule enabled."
+                                                } catch (error: Exception) {
+                                                    errorMessage = error.message ?: "Could not update the schedule."
+                                                } finally {
+                                                    isBusy = false
+                                                }
+                                            }
+                                        }
+                                    ) { Text(if (schedule.enabled) "Pause" else "Enable") }
+                                }
+                            }
+                        }
+                    }
+                    if (themes.any { it.themeId == selectedGroup.currentThemeId && it.layoutMode == "shared" }) {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isBusy,
+                            onClick = {
+                                scope.launch {
+                                    isBusy = true
+                                    errorMessage = ""
+                                    statusMessage = ""
+                                    try {
+                                        val appliedName = withContext(Dispatchers.IO) {
+                                            repository.applyActiveSharedTheme(selectedGroup.groupId)
+                                        }
+                                        statusMessage = "Applied '$appliedName' to this device."
+                                    } catch (error: Exception) {
+                                        errorMessage = error.message ?: "Could not apply the active shared theme."
+                                    } finally {
+                                        isBusy = false
+                                    }
+                                }
+                            }
+                        ) { Text("Apply active theme to this device") }
+                    }
+                    // SCHEDULED_SHARED_THEME_CHANGES_END
 
                     Text("INVITATIONS", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.CenterVertically) {

@@ -14,6 +14,8 @@ DECLARE
   theme_id uuid;
   schedule_id uuid;
   sync_state jsonb;
+  schedule_next timestamptz;
+  schedule_runs integer;
   denied boolean := false;
 BEGIN
   INSERT INTO auth.users(id) VALUES(owner_id),(member_id);
@@ -74,6 +76,19 @@ BEGIN
   theme_id := public.nurva_save_theme(group_id,owner_device,repeat('a',64),null,'Test theme','shared',jsonb_build_array(jsonb_build_object('revisionId',revision_id::text,'deviceId',null)),true);
   schedule_id := public.nurva_save_schedule(group_id,owner_device,repeat('a',64),null,theme_id,127,9,0,'UTC',true,false);
   IF schedule_id IS NULL THEN RAISE EXCEPTION 'Schedule not created'; END IF;
+  SELECT next_run_at INTO schedule_next FROM public.nurva_schedules WHERE id=schedule_id;
+  IF schedule_next IS NULL OR schedule_next<=now() THEN RAISE EXCEPTION 'Enabled schedule has no future run time'; END IF;
+  UPDATE public.nurva_groups SET current_theme_id=NULL WHERE id=group_id;
+  UPDATE public.nurva_schedules SET next_run_at=now()-interval '1 minute' WHERE id=schedule_id;
+  schedule_runs := public.nurva_process_due_theme_schedules(group_id,owner_device,repeat('a',64));
+  IF schedule_runs<>1 THEN RAISE EXCEPTION 'Due theme schedule was not processed exactly once'; END IF;
+  IF (SELECT current_theme_id FROM public.nurva_groups WHERE id=group_id)<>theme_id THEN RAISE EXCEPTION 'Due schedule did not activate its theme'; END IF;
+  IF (SELECT next_run_at FROM public.nurva_schedules WHERE id=schedule_id)<=now() THEN RAISE EXCEPTION 'Due schedule was not advanced to its next occurrence'; END IF;
+  schedule_runs := public.nurva_process_due_theme_schedules(group_id,owner_device,repeat('a',64));
+  IF schedule_runs<>0 THEN RAISE EXCEPTION 'A processed schedule ran twice'; END IF;
+  sync_state := public.nurva_get_sync_state(group_id,owner_device,repeat('a',64));
+  IF jsonb_array_length(sync_state->'schedules')<>1 THEN RAISE EXCEPTION 'Schedule missing from sync snapshot'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(sync_state->'themes') AS theme(item), jsonb_array_elements(item->'items') AS theme_item(item) WHERE theme_item.item->>'mimeType'='image/png') THEN RAISE EXCEPTION 'Theme wallpaper asset metadata missing from sync snapshot'; END IF;
   PERFORM public.nurva_save_mosaic_tiles(group_id,owner_device,repeat('a',64),1,jsonb_build_array(jsonb_build_object(
     'deviceId',owner_device::text,'tileIndex',0,'rowIndex',0,'columnIndex',0,
     'cropLeft',0,'cropTop',0,'cropRight',1,'cropBottom',1,'outputWidth',1080,'outputHeight',2400

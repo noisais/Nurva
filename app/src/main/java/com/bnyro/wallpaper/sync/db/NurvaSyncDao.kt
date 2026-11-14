@@ -70,6 +70,9 @@ interface NurvaSyncDao {
     @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId ORDER BY revision DESC")
     suspend fun getRevisions(groupId: String): List<SyncWallpaperRevisionEntity>
 
+    @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId AND revisionId = :revisionId LIMIT 1")
+    suspend fun getRevision(groupId: String, revisionId: String): SyncWallpaperRevisionEntity?
+
     @Query("SELECT * FROM nurva_wallpaper_revisions WHERE groupId = :groupId ORDER BY revision DESC")
     fun observeRevisions(groupId: String): Flow<List<SyncWallpaperRevisionEntity>>
 
@@ -112,6 +115,19 @@ interface NurvaSyncDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertSchedule(schedule: SyncScheduleEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSchedules(schedules: List<SyncScheduleEntity>)
+
+    @Query("DELETE FROM nurva_sync_schedules WHERE groupId = :groupId")
+    suspend fun clearSchedules(groupId: String)
+
+    @Transaction
+    suspend fun replaceSchedules(groupId: String, schedules: List<SyncScheduleEntity>) {
+        require(schedules.all { it.groupId == groupId }) { "Every schedule must belong to the group being replaced" }
+        clearSchedules(groupId)
+        if (schedules.isNotEmpty()) upsertSchedules(schedules)
+    }
 
     @Query("SELECT * FROM nurva_sync_schedules WHERE groupId = :groupId ORDER BY localHour, localMinute")
     fun observeSchedules(groupId: String): Flow<List<SyncScheduleEntity>>

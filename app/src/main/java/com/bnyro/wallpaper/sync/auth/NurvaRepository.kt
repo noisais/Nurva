@@ -12,6 +12,7 @@ import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
 import com.bnyro.wallpaper.sync.db.MosaicTileAssignmentEntity
 import com.bnyro.wallpaper.sync.db.SyncOutboxEntity
+import com.bnyro.wallpaper.sync.db.SyncScheduleEntity
 import com.bnyro.wallpaper.sync.db.SyncThemeEntity
 import com.bnyro.wallpaper.sync.db.SyncThemeItemEntity
 import com.bnyro.wallpaper.sync.db.SyncWallpaperRevisionEntity
@@ -40,6 +41,7 @@ class NurvaRepository(context: Context) {
     private val sessionStore = SecureSessionStore(appContext)
     private val deviceCredentials = DeviceCredentialStore(appContext)
     private val localIndex = LocalDeviceIndex(appContext)
+    private val scheduledThemeState = appContext.getSharedPreferences("nurva_scheduled_theme_state", Context.MODE_PRIVATE)
     private val dao = DatabaseHolder.Database.nurvaSyncDao()
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -319,6 +321,10 @@ class NurvaRepository(context: Context) {
             ?.takeIf { it.revision == group.currentRevision }
             ?: error("Wallpaper metadata is not available. Refresh the group and try again.")
 
+        return downloadRevisionFile(groupId, revision)
+    }
+
+    private suspend fun downloadRevisionFile(groupId: String, revision: SyncWallpaperRevisionEntity): File {
         val extension = when (revision.mimeType) {
             "image/jpeg" -> "jpg"
             "image/png" -> "png"
@@ -421,7 +427,9 @@ class NurvaRepository(context: Context) {
      */
     suspend fun syncAndApplyAvailableWallpapers() {
         val session = currentSession() ?: return
-        localIndex.groupIds(session.userId).forEach { groupId ->
+        val groupIds = localIndex.groupIds(session.userId)
+        groupIds.forEach { groupId ->
+            processDueThemeSchedules(groupId)
             refreshGroup(groupId)
             val deviceId = localIndex.deviceId(session.userId, groupId) ?: return@forEach
             val device = dao.getDevice(deviceId) ?: return@forEach
@@ -457,6 +465,7 @@ class NurvaRepository(context: Context) {
             }
         }
         processQueuedWallpaperApplications()
+        groupIds.forEach { groupId -> applyActiveSharedThemeIfNeeded(groupId) }
     }
 
     /** Explicit user approval uses the same verified download/apply path as automatic sync. */
@@ -763,6 +772,114 @@ class NurvaRepository(context: Context) {
         runCatching { refreshGroup(groupId) }
     }
 
+
+    /** Creates or updates a weekly shared-theme activation rule on the server. */
+    suspend fun saveSharedThemeSchedule(
+        groupId: String,
+        scheduleId: String?,
+        themeId: String,
+        daysOfWeekMask: Int,
+        localHour: Int,
+        localMinute: Int,
+        timeZoneId: String,
+        enabled: Boolean
+    ): String {
+        validateNurvaSchedule(daysOfWeekMask, localHour, localMinute, timeZoneId)
+        val theme = dao.getTheme(groupId, themeId)
+            ?: error("That shared theme is not available. Refresh the group and try again.")
+        require(theme.layoutMode == "shared") { "Only shared-layout themes can be scheduled right now." }
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        val id = scheduleId ?: UUID.randomUUID().toString()
+        val rawResult = rpc(
+            "nurva_save_schedule",
+            JSONObject()
+                .put("p_group", groupId)
+                .put("p_device", identity.deviceId)
+                .put("p_secret", identity.secret)
+                .put("p_schedule", id)
+                .put("p_theme", themeId)
+                .put("p_days", daysOfWeekMask)
+                .put("p_hour", localHour)
+                .put("p_minute", localMinute)
+                .put("p_zone", timeZoneId)
+                .put("p_enabled", enabled)
+                .put("p_approval", false),
+            session
+        )
+        check(rawResult.trim().removeSurrounding("\"").equals(id, ignoreCase = true)) {
+            "The server did not confirm the scheduled theme. Refresh the group."
+        }
+        runCatching { refreshGroup(groupId) }
+        return id
+    }
+
+    /** Manual-mode devices can explicitly apply the group's current shared theme. */
+    suspend fun applyActiveSharedTheme(groupId: String): String {
+        refreshGroup(groupId)
+        val session = validSession()
+        val deviceId = localIndex.deviceId(session.userId, groupId)
+            ?: error("This device is not registered in that group.")
+        val device = dao.getDevice(deviceId)
+            ?: error("This device's settings are not available. Refresh the group.")
+        val themeId = dao.getGroup(groupId)?.currentThemeId
+            ?: error("The group does not have an active theme.")
+        return applySharedThemeToDevice(groupId, themeId, device)
+    }
+
+    private suspend fun processDueThemeSchedules(groupId: String) {
+        val session = validSession()
+        val identity = localIdentity(session.userId, groupId)
+        rpc(
+            "nurva_process_due_theme_schedules",
+            JSONObject()
+                .put("p_group", groupId)
+                .put("p_device", identity.deviceId)
+                .put("p_secret", identity.secret),
+            session
+        )
+    }
+
+    private suspend fun applyActiveSharedThemeIfNeeded(groupId: String) {
+        val session = currentSession() ?: return
+        val deviceId = localIndex.deviceId(session.userId, groupId) ?: return
+        val device = dao.getDevice(deviceId) ?: return
+        if (device.applyMode != "auto") return
+        val themeId = dao.getGroup(groupId)?.currentThemeId ?: return
+        val theme = dao.getTheme(groupId, themeId) ?: return
+        if (theme.layoutMode != "shared") return
+        if (scheduledThemeState.getString(appliedThemeKey(session.userId, groupId), null) == themeId) return
+        applySharedThemeToDevice(groupId, themeId, device)
+    }
+
+    private suspend fun applySharedThemeToDevice(
+        groupId: String,
+        themeId: String,
+        device: SyncDeviceEntity
+    ): String {
+        val theme = dao.getTheme(groupId, themeId)
+            ?: error("The active shared theme is not available on this device. Refresh the group.")
+        check(theme.layoutMode == "shared") { "Only shared-layout themes can be applied by this scheduler." }
+        val firstItem = dao.getThemeItems(themeId).firstOrNull()
+            ?: error("The active shared theme does not contain a wallpaper.")
+        val revision = dao.getRevision(groupId, firstItem.revisionId)
+            ?: error("The active theme's wallpaper metadata is missing. Refresh the group.")
+        val file = downloadRevisionFile(groupId, revision)
+        val target = when (device.wallpaperTarget) {
+            "home" -> WallpaperTarget.HOME
+            "both" -> WallpaperTarget.BOTH
+            else -> WallpaperTarget.LOCK
+        }
+        WallpaperHelper.setWallpaperFromFile(appContext, file, target)
+        val session = validSession()
+        check(scheduledThemeState.edit()
+            .putString(appliedThemeKey(session.userId, groupId), themeId)
+            .commit()) { "The theme was applied, but its local sync marker could not be saved." }
+        return theme.name
+    }
+
+    private fun appliedThemeKey(userId: String, groupId: String): String = "applied_${userId}_$groupId"
+
     private suspend fun persistSnapshot(groupId: String, state: JSONObject) {
         val group = state.getJSONObject("group")
         val wallpaper = state.optJSONObject("currentWallpaper")
@@ -874,6 +991,32 @@ class NurvaRepository(context: Context) {
                 val themeItem = themeItemJson.optJSONObject(itemIndex) ?: return@mapNotNull null
                 val revisionId = themeItem.optString("revisionId").takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
+                val revisionNumber = themeItem.optLong("revision", 0L)
+                val storagePath = themeItem.optString("storagePath").takeIf { it.isNotBlank() && it != "null" }
+                val sha256 = themeItem.optString("sha256").takeIf { it.isNotBlank() && it != "null" }
+                val mimeType = themeItem.optString("mimeType").takeIf { it.isNotBlank() && it != "null" }
+                if (revisionNumber > 0L && storagePath != null && sha256 != null && mimeType != null) {
+                    val previousRevision = dao.getRevision(groupId, revisionId)
+                    dao.upsertRevision(
+                        SyncWallpaperRevisionEntity(
+                            revisionId = revisionId,
+                            groupId = groupId,
+                            revision = revisionNumber,
+                            createdByUserId = "",
+                            storagePath = storagePath,
+                            localFilePath = previousRevision?.localFilePath,
+                            sha256 = sha256,
+                            mimeType = mimeType,
+                            byteSize = themeItem.optLong("byteSize", previousRevision?.byteSize ?: 0L),
+                            imageWidth = themeItem.optInt("imageWidth", previousRevision?.imageWidth ?: 0),
+                            imageHeight = themeItem.optInt("imageHeight", previousRevision?.imageHeight ?: 0),
+                            createdAt = previousRevision?.createdAt
+                                ?: themeItem.optNullableString("createdAt")?.let(::parseTimestamp)
+                                ?: now,
+                            localState = previousRevision?.localState ?: "pending_download"
+                        )
+                    )
+                }
                 SyncThemeItemEntity(
                     themeId = themeId,
                     position = themeItem.optInt("position", itemIndex),
@@ -884,6 +1027,25 @@ class NurvaRepository(context: Context) {
             }
             dao.replaceThemeItems(themeId, themeItems)
         }
+        val schedulesJson = state.optJSONArray("schedules") ?: JSONArray()
+        val schedules = (0 until schedulesJson.length()).mapNotNull { index ->
+            val item = schedulesJson.optJSONObject(index) ?: return@mapNotNull null
+            val scheduleId = item.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            SyncScheduleEntity(
+                scheduleId = scheduleId,
+                groupId = groupId,
+                themeId = item.optNullableString("themeId"),
+                daysOfWeekMask = item.optInt("daysOfWeekMask", 0),
+                localHour = item.optInt("localHour", 0),
+                localMinute = item.optInt("localMinute", 0),
+                timeZoneId = item.optString("timeZoneId", "UTC"),
+                enabled = item.optBoolean("enabled", false),
+                requireApproval = item.optBoolean("requireApproval", false),
+                nextRunAt = item.optNullableString("nextRunAt")?.let(::parseTimestamp),
+                updatedAt = item.optNullableString("updatedAt")?.let(::parseTimestamp) ?: System.currentTimeMillis()
+            )
+        }
+        dao.replaceSchedules(groupId, schedules)
     }
 
     private fun localIdentity(userId: String, groupId: String): DeviceCredentialStore.DeviceIdentity {
