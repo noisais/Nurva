@@ -62,8 +62,12 @@ import com.bnyro.wallpaper.sync.auth.deviceSyncStatusLabel
 import com.bnyro.wallpaper.sync.auth.NurvaRepository
 import com.bnyro.wallpaper.sync.auth.nurvaScheduleDaysLabel
 import com.bnyro.wallpaper.sync.auth.parseNurvaScheduleTime
+import com.bnyro.wallpaper.sync.auth.syncQueueCanRetry
+import com.bnyro.wallpaper.sync.auth.syncQueueDetail
+import com.bnyro.wallpaper.sync.auth.syncQueueStatusLabel
 import com.bnyro.wallpaper.ui.models.MainModel
 import com.bnyro.wallpaper.sync.db.SyncDeviceEntity
+import com.bnyro.wallpaper.sync.db.SyncOutboxEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupEntity
 import com.bnyro.wallpaper.sync.db.SyncGroupMemberEntity
 import com.bnyro.wallpaper.sync.db.SyncScheduleEntity
@@ -165,6 +169,11 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
         if (selectedGroupId.isBlank()) flowOf(emptyList<SyncScheduleEntity>()) else dao.observeSchedules(selectedGroupId)
     }
     val schedules by schedulesFlow.collectAsState(initial = emptyList())
+    val queueOperationsFlow = remember(selectedGroupId) {
+        if (selectedGroupId.isBlank()) flowOf(emptyList<SyncOutboxEntity>())
+        else dao.observeOperations(selectedGroupId)
+    }
+    val queueOperations by queueOperationsFlow.collectAsState(initial = emptyList())
     val schedulableThemes = remember(themes) { themes.filter { it.layoutMode == "shared" } }
     val activeDevices = remember(devices) {
         devices.filter { it.revokedAt == null }
@@ -470,6 +479,93 @@ fun NurvaSyncPage(viewModel: MainModel, onBrowseWallpapers: () -> Unit) {
                             Text(if (thisDevice?.applyMode == "manual") "Approve & apply latest" else "Apply latest now")
                         }
                     }
+
+                    // NURVA_SYNC_QUEUE_DASHBOARD_BEGIN
+                    Text("SYNC QUEUE", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    val retryPendingCount = queueOperations.count { syncQueueStatusLabel(it) == "Retry pending" }
+                    val approvalPendingCount = queueOperations.count { syncQueueStatusLabel(it) == "Waiting for approval" }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("${queueOperations.size} pending operations", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "$retryPendingCount needing retry · $approvalPendingCount awaiting approval",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        TextButton(
+                            enabled = !isBusy,
+                            onClick = {
+                                NurvaSyncWorker.enqueueNow(context)
+                                statusMessage = "A sync run was requested. It will start when Android allows connected background work."
+                            }
+                        ) { Text("Sync now") }
+                    }
+                    if (queueOperations.isEmpty()) {
+                        Text("This group's local sync queue is clear.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        queueOperations.forEach { operation ->
+                            val queuedAt = runCatching {
+                                Instant.ofEpochMilli(operation.createdAt)
+                                    .atZone(ZoneId.systemDefault())
+                                    .format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+                            }.getOrNull()
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        if (operation.operationType == "apply_wallpaper") "Wallpaper update" else operation.operationType.replace('_', ' ').replaceFirstChar { it.uppercase() },
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(syncQueueStatusLabel(operation), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                                }
+                                Text(
+                                    (if (operation.attempts == 1) "1 attempt" else "${operation.attempts} attempts") +
+                                        (queuedAt?.let { " · added $it" } ?: ""),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                syncQueueDetail(operation)?.let { detail ->
+                                    Text("Last error: $detail", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (syncQueueCanRetry(operation) && thisDevice?.applyMode == "auto") {
+                                    OutlinedButton(
+                                        enabled = !isBusy,
+                                        onClick = {
+                                            scope.launch {
+                                                isBusy = true
+                                                errorMessage = ""
+                                                statusMessage = ""
+                                                try {
+                                                    withContext(Dispatchers.IO) {
+                                                        repository.retryQueuedOperation(selectedGroup.groupId, operation.operationId)
+                                                    }
+                                                    NurvaSyncWorker.enqueueNow(context)
+                                                    statusMessage = "Retry requested. The wallpaper will be retried when connected background work runs."
+                                                } catch (error: Exception) {
+                                                    errorMessage = error.message ?: "Could not retry this queue item."
+                                                } finally {
+                                                    isBusy = false
+                                                }
+                                            }
+                                        }
+                                    ) { Text("Retry now") }
+                                } else if (syncQueueCanRetry(operation)) {
+                                    Text(
+                                        if (thisDevice == null) "This device's sync settings are unavailable. Refresh the group."
+                                        else "Switch this device to Auto sync to enable retry.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    // NURVA_SYNC_QUEUE_DASHBOARD_END
 
                     // SHARED_THEMES_UI_BEGIN
                     Text("SHARED THEMES", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)

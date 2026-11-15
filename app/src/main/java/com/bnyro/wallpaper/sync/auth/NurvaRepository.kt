@@ -814,6 +814,31 @@ class NurvaRepository(context: Context) {
         return id
     }
 
+    /** Makes one retryable wallpaper operation eligible for the next background sync. */
+    suspend fun retryQueuedOperation(groupId: String, operationId: String) {
+        val session = validSession()
+        require(groupId in localIndex.groupIds(session.userId)) {
+            "You no longer have access to this group. Refresh your groups and try again."
+        }
+        val deviceId = localIndex.deviceId(session.userId, groupId)
+            ?: error("This device is not registered in that group.")
+        localIdentity(session.userId, groupId)
+        val device = dao.getDevice(deviceId)
+            ?: error("This device's sync settings are not available. Refresh the group.")
+        require(device.applyMode == "auto") {
+            "Switch this device to Auto sync before retrying a wallpaper update."
+        }
+        val operation = dao.getOperation(operationId)
+            ?: error("That queue item is no longer pending. Refresh the queue.")
+        require(operation.groupId == groupId) {
+            "That queue item does not belong to the selected group."
+        }
+        require(syncQueueCanRetry(operation)) {
+            "That queue item is not eligible for automatic retry. Manual approvals must use the approval action."
+        }
+        dao.scheduleOperation(operationId, System.currentTimeMillis(), null)
+    }
+
     /** Manual-mode devices can explicitly apply the group's current shared theme. */
     suspend fun applyActiveSharedTheme(groupId: String): String {
         refreshGroup(groupId)
